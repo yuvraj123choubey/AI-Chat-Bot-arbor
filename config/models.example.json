@@ -1,0 +1,42 @@
+[
+  {
+    "id": "openai-fast", "provider": "openai", "modelIdEnv": "OPENAI_FAST_MODEL", "modelId": "", "displayName": "OpenAI fast", "capabilities": ["fast", "tools", "vision"],
+    "supportsStreaming": true, "supportsTools": true, "supportsVision": true, "supportsReasoning": false, "supportsCoding": false,
+    "contextWindow": 0, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "openai-reasoning", "provider": "openai", "modelIdEnv": "OPENAI_REASONING_MODEL", "modelId": "", "displayName": "OpenAI reasoning", "capabilities": ["reasoning", "coding", "tools", "vision"],
+    "supportsStreaming": true, "supportsTools": true, "supportsVision": true, "supportsReasoning": true, "supportsCoding": true,
+    "contextWindow": 0, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "claude-fast", "provider": "anthropic", "modelIdEnv": "ANTHROPIC_FAST_MODEL", "modelId": "", "displayName": "Claude fast", "capabilities": ["fast", "coding", "tools"],
+    "supportsStreaming": true, "supportsTools": true, "supportsVision": true, "supportsReasoning": false, "supportsCoding": true,
+    "contextWindow": 0, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "claude", "provider": "anthropic", "modelIdEnv": "ANTHROPIC_MODEL", "modelId": "", "displayName": "Claude", "capabilities": ["coding", "reasoning", "tools", "documents"],
+    "supportsStreaming": true, "supportsTools": true, "supportsVision": true, "supportsReasoning": true, "supportsCoding": true,
+    "contextWindow": 0, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "gemini-fast", "provider": "google", "modelIdEnv": "GOOGLE_FAST_MODEL", "modelId": "", "displayName": "Gemini fast", "capabilities": ["fast", "vision", "tools"],
+    "supportsStreaming": true, "supportsTools": true, "supportsVision": true, "supportsReasoning": false, "supportsCoding": false,
+    "contextWindow": 0, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "gemini", "provider": "google", "modelIdEnv": "GOOGLE_MODEL", "modelId": "", "displayName": "Gemini", "capabilities": ["reasoning", "vision", "large-context", "tools"],
+    "supportsStreaming": true, "supportsTools": true, "supportsVision": true, "supportsReasoning": true, "supportsCoding": false,
+    "contextWindow": 0, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "deepseek-chat", "provider": "deepseek", "modelIdEnv": "DEEPSEEK_CHAT_MODEL", "modelId": "", "displayName": "DeepSeek", "capabilities": ["fast", "coding", "technical-analysis", "tools"],
+    "supportsStreaming": true, "supportsTools": true, "supportsVision": false, "supportsReasoning": false, "supportsCoding": true,
+    "contextWindow": 0, "maxOutputTokens": 8192, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "deepseek-reasoning", "provider": "deepseek", "modelIdEnv": "DEEPSEEK_REASONING_MODEL", "modelId": "", "displayName": "DeepSeek reasoning", "capabilities": ["reasoning", "coding", "technical-analysis"],
+    "supportsStreaming": true, "supportsTools": false, "supportsVision": false, "supportsReasoning": true, "supportsCoding": true,
+    "contextWindow": 0, "maxOutputTokens": 32768, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  }
+]
