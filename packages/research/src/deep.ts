@@ -9,7 +9,7 @@ export interface ResearchPlan { objective: string; subquestions: Subquestion[] }
 export interface Note { topic: string; content: string; sourceOrdinals: number[] }
 export interface Conflict { topic: string; description: string; sourceOrdinals: number[] }
 export interface RegisteredSource { ordinal: number; source: RetrievedSource; passages: Passage[]; topics: Set<string> }
-export interface DeepProgress { stage: "planning" | "searching" | "reading" | "comparing" | "notes" | "gaps" | "writing"; label: string; detail?: string }
+export interface DeepProgress { stage: "planning" | "searching" | "resolving" | "reading" | "comparing" | "extracting" | "verifying" | "notes" | "gaps" | "writing"; label: string; detail?: string }
 
 export interface DeepResearchDeps {
   gather(options: { question: string; queries: string[]; focus: SearchFocus; onStatus(status: ResearchStatus): void; signal?: AbortSignal }): Promise<GatherResult>;

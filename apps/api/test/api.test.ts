@@ -91,7 +91,7 @@ before(async () => {
     messages: [{ id: "22222222-2222-4222-8222-222222222222", role: "user", content: "old question", createdAt: "2026-01-01T00:00:00Z" },
       { id: "33333333-3333-4333-8333-333333333333", role: "assistant", content: "old answer", createdAt: "2026-01-01T00:00:01Z", status: "complete" }]
   }));
-  app = await createApp({ db: testDb.db, providers: [provider], registry: [model], searchProviders: [official, search], dataRoot: testDb.dataRoot });
+  app = await createApp({ db: testDb.db, providers: [provider], registry: [model], searchProviders: [official, search], dataRoot: testDb.dataRoot, normalize: async text => ({ text, corrections: [] }) });
   server = createHttpServer(app).listen(0, "127.0.0.1");
   await new Promise(r => server.once("listening", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -313,7 +313,8 @@ test("regression: answers without search keep no invented links or citation numb
 });
 
 test("regression: an unsearched 'does not exist' answer triggers a search and is replaced", async () => {
-  const { events } = await chat({ message: "tell me about the zorblax protocol" });
+  // Phrased so that Auto does not search up front ("tell me about…" now searches immediately).
+  const { events } = await chat({ message: "the zorblax protocol" });
   const types = events.map(e => e.type);
   assert.ok(types.indexOf("reset") > types.indexOf("delta"), "the first draft streamed, then was reset");
   assert.ok(types.indexOf("sources") > types.indexOf("reset"), "search ran after the reset");

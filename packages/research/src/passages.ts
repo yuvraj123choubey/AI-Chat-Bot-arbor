@@ -75,7 +75,12 @@ export function queryTerms(question: string, queries: string[]): Map<string, num
 
 const typePrior: Partial<Record<SourceType, number>> = { official: 1.6, academic: 1.12, government: 1.1, documentation: 1.08, encyclopedia: 1.03, news: 1.02, forum: 0.92 };
 const lowAuthority = /(^|\.)(coursehero\.com|chegg\.com|studocu\.com|quizlet\.com|scribd\.com|brainly\.com|numerade\.com|bartleby\.com|studypool\.com)$/;
-export interface EvidenceLimits { maxSources: number; perSource: number; maxPassages: number }
+export interface EvidenceLimits {
+  maxSources: number; perSource: number; maxPassages: number;
+  /** Canonical URLs of pages about the exact subject asked (an identified event); they are read in depth. */
+  primary?: Set<string>;
+  primaryPerSource?: number;
+}
 const COVERAGE_CUTOFF = 0.5;
 
 /**
@@ -93,11 +98,15 @@ export function selectEvidence(sources: RetrievedSource[], question: string, que
   const bm25 = new Bm25(all.map(p => `${sources[p.source].title}\n${p.text}`));
   const terms = queryTerms(question, queries);
   const scored = all.map((p, i) => ({ ...p, score: bm25.score(i, terms) }));
+  const isPrimary = (i: number) => Boolean(limits.primary?.has(sources[i].canonicalUrl));
   const perSource = new Map<number, Passage[]>();
   for (const p of scored.sort((a, b) => b.score - a.score)) {
-    if (p.score <= 0) break;
+    // A page about the exact event is read broadly: its sections on, say, the investigation may not repeat the
+    // question's words but are exactly the details wanted.
+    const primary = isPrimary(p.source);
+    if (p.score <= 0 && !primary) continue;
     const list = perSource.get(p.source) || [];
-    if (list.length < limits.perSource) { list.push({ text: p.text, start: p.start, score: p.score }); perSource.set(p.source, list); }
+    if (list.length < (primary ? limits.primaryPerSource ?? limits.perSource : limits.perSource)) { list.push({ text: p.text, start: p.start, score: p.score }); perSource.set(p.source, list); }
   }
   const domains = new Map<string, number>();
   const ranked = [...perSource.entries()]
@@ -119,7 +128,11 @@ export function selectEvidence(sources: RetrievedSource[], question: string, que
   };
   const covered = ranked.map(entry => ({ ...entry, coverage: coverage(entry.i, entry.passages) }));
   const bestCoverage = Math.max(0, ...covered.map(c => c.coverage));
-  const relevant = covered.filter(entry => entry.coverage >= bestCoverage * COVERAGE_CUTOFF).slice(0, limits.maxSources);
+  const primaryOrder = [...(limits.primary ?? [])];
+  const relevant = [
+    ...covered.filter(entry => isPrimary(entry.i)).sort((a, b) => primaryOrder.indexOf(sources[a.i].canonicalUrl) - primaryOrder.indexOf(sources[b.i].canonicalUrl)),
+    ...covered.filter(entry => !isPrimary(entry.i) && entry.coverage >= bestCoverage * COVERAGE_CUTOFF)
+  ].slice(0, limits.maxSources);
   let budget = limits.maxPassages;
   const chosen: EvidenceSource[] = [];
   for (const entry of relevant) {

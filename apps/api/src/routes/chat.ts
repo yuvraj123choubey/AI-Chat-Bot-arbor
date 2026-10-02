@@ -5,6 +5,11 @@ import type { Message, ModelDefinition, ReasoningMode } from "../../../../packag
 import { citationClaims, citationRules, gatherEvidence, groundedUserPrompt, sanitizeCitations, sanitizeLinks, searchIntent, urls, type ResearchStatus, type SearchMode } from "../../../../packages/research/src/index.ts";
 import { claimsUnverifiable, type SearchIntent } from "../../../../packages/research/src/intent.ts";
 import { planQueries } from "../../../../packages/research/src/queries.ts";
+import { extractionMessages, factSheetBlock, parseFacts, sourcesForExtraction, type Fact } from "../../../../packages/research/src/facts.ts";
+import { applyVerdicts, claimsToVerify, enforcePrecision, ensureUnidentified, mentionOtherEvents, tidyAnswer, verifyMessages } from "../../../../packages/research/src/precision.ts";
+import { eventAnswerRules } from "../../../../packages/research/src/prompt.ts";
+import type { EvidenceSource } from "../../../../packages/research/src/types.ts";
+import { generateText } from "../../../../packages/ai/src/structured.ts";
 import type { App } from "../app.ts";
 import { ndjson, readJson, send, type RouteContext } from "../http.ts";
 import { isConversationId, titleFrom, type MessageMeta } from "../repos/conversations.ts";
@@ -85,31 +90,62 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     let grounding: string | undefined;
     let ordinals = new Map<number, string>();
     let sourceUrls: string[] = [];
+    let evidence: EvidenceSource[] = [];
+    let verifiedFacts: Fact[] = [];
+    let matchedEvents: { title: string; date?: string }[] = [];
+    // Misspelled or run-together names ("telaviv", "fly dubai") are corrected before deciding and searching.
+    const normalized = input.searchMode === "off" ? { text: decision.searchText, corrections: [] } : await app.normalize(decision.searchText, stream.signal);
+    const searchText = normalized.text;
 
     /** Searches and grounds the latest turn in the results. Returns false if the client went away. */
     const runSearch = async (intent: SearchIntent): Promise<boolean> => {
       try {
-        status({ stage: "searching", label: "Searching", detail: "Choosing search queries" });
+        status({ stage: "searching", label: "Searching", detail: normalized.corrections.length ? `Reading ${normalized.corrections.map(c => `"${c.from}" as "${c.to}"`).join(", ")}` : "Choosing search queries" });
         const plan = await planQueries({
-          question: decision.searchText, previous: continuing ? decision.previousUser : undefined, max: input.reasoningLevel === "fast" ? 1 : input.reasoningLevel === "deep" ? 3 : 2,
+          question: searchText, previous: continuing ? decision.previousUser : undefined, max: input.reasoningLevel === "fast" ? 1 : input.reasoningLevel === "deep" ? 3 : 2,
           candidates: plannerCandidates(app, models, input), providers: app.providerMap, signal: stream.signal
         });
         if (plan.model) await app.recordUsage({ provider: plan.model.provider, model: plan.model.modelId, registryId: plan.model.id, task: "search", role: "query-planner", status: "complete", ...plan.usage, ...context });
-        const gathered = await gatherEvidence({ providers: app.searchProviders }, { question: decision.searchText, queries: plan.queries, focus: intent, depth: input.reasoningLevel, signal: stream.signal, onStatus: status });
+        const gathered = await gatherEvidence({ providers: app.searchProviders }, { question: searchText, queries: plan.queries, focus: intent, depth: input.reasoningLevel, signal: stream.signal, onStatus: status });
         for (const message of gathered.notices) notice(message);
+        evidence = gathered.evidence;
+        if (intent.event) matchedEvents = gathered.anchors ?? [];
         ordinals = await app.sources.attachToMessage(workspaceId, reply.id, gathered.evidence);
         sourceUrls = gathered.evidence.flatMap(e => [e.source.url, String(e.source.metadata.finalUrl ?? e.source.url)]);
         const rows = await app.db.source.findMany({ where: { id: { in: [...ordinals.values()] } } });
         const byId = new Map(rows.map(r => [r.id, toSourceView(r)]));
         stream.write({ type: "sources", sources: gathered.evidence.map(e => ({ ordinal: e.ordinal, cited: false, source: byId.get(ordinals.get(e.ordinal)!) })) });
-        modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, gathered.evidence) };
+        // For a specific event, the concrete details are extracted and each one checked against its source first.
+        let sheet = "";
+        if (intent.event && gathered.evidence.length) {
+          status({ stage: "extracting", label: "Extracting details", detail: gathered.anchors?.length ? gathered.anchors.slice(0, 2).map(a => a.title).join(" · ") : undefined });
+          try {
+            // Only sources about the identified event feed extraction, so details of other events cannot leak in.
+            const about = sourcesForExtraction(gathered.evidence, gathered.anchors);
+            const extracted = await generateText({
+              candidates: plannerCandidates(app, models, input), providers: app.providerMap, signal: stream.signal, timeoutMs: 240_000, maxOutputTokens: 1500,
+              messages: extractionMessages(question, about, gathered.anchors),
+              onCall: call => app.recordUsage({ provider: call.model.provider, model: call.model.modelId, registryId: call.model.id, task: "search", role: "detail-extractor", status: call.ok ? "complete" : "failed", ...call.usage, ...context })
+            });
+            const facts = parseFacts(extracted.text, about);
+            verifiedFacts = facts.facts;
+            sheet = factSheetBlock(facts, gathered.anchors);
+            if (facts.dropped.length) console.warn(`Dropped ${facts.dropped.length} extracted detail(s) not found in the sources.`);
+            status({ stage: "extracting", label: "Extracting details", detail: `${facts.facts.length} details verified${facts.dropped.length ? `, ${facts.dropped.length} unsupported dropped` : ""}` });
+          } catch (error) {
+            if (stream.signal.aborted) throw error;
+            status({ stage: "extracting", label: "Extracting details", detail: "skipped" });
+          }
+        }
+        modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, gathered.evidence, sheet) };
+        grounding = intent.event ? `${citationRules} ${eventAnswerRules}` : citationRules;
       } catch (error) {
         if (stream.signal.aborted) return false;
         console.warn("Search failed:", error instanceof Error ? error.message : error);
         notice("Web search failed, so this answer has no sources.");
         modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, []) };
+        grounding = citationRules;
       }
-      grounding = citationRules;
       status({ stage: "writing", label: "Writing answer" });
       return true;
     };
@@ -135,23 +171,47 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
       throw new Error("The model stream ended without a result");
     };
 
-    const intent = searchIntent(decision.searchText, input.searchMode);
+    const intent = searchIntent(searchText, input.searchMode);
     if (intent.search && !(await runSearch(intent))) return stopped();
     let result = await answer();
     // An unsearched answer must not claim something doesn't exist or can't be found: check first, then answer again.
     if (!grounding && input.searchMode === "auto" && decision.mode !== "ambiguous" && result.event.type === "done" && claimsUnverifiable(result.content)) {
       stream.write({ type: "reset", reason: "Checking with a web search before answering." });
       notice("Arbor was unsure about this, so it searched before answering.");
-      if (!(await runSearch(searchIntent(decision.searchText, "on")))) return stopped();
+      if (!(await runSearch(searchIntent(searchText, "on")))) return stopped();
       result = await answer();
     }
 
     const { event, content, meta } = result;
-    // Citations and links are resolved by the backend: anything not backed by a retrieved source is removed.
+    // Citations and links are resolved by the backend: anything not backed by a retrieved source is removed,
+    // each citation must support the exact detail beside it, and names found in no source are never kept.
     const allowed = new Set(ordinals.keys());
-    const cited = sanitizeCitations(content, allowed);
+    const first = sanitizeCitations(content, allowed);
+    const precise = grounding && evidence.length ? enforcePrecision(first.text, evidence, question) : undefined;
+    if (precise && (precise.recited || precise.uncited || precise.droppedSentences.length)) console.warn(`Precision check: ${precise.recited} citation(s) moved, ${precise.uncited} removed, ${precise.droppedSentences.length} sentence(s) with unsourced names dropped.`);
+    // For an event answer, claims that word overlap cannot confirm are checked against their source by a model;
+    // sentences judged unsupported are removed.
+    let checked = precise?.text;
+    if (precise && intent.event && event.type === "done" && !stream.signal.aborted) {
+      const claims = claimsToVerify(precise.text, evidence);
+      if (claims.length) {
+        status({ stage: "verifying", label: "Verifying result", detail: `${claims.length} claims checked against their sources` });
+        try {
+          const verdicts = await generateText({ candidates: plannerCandidates(app, models, input), providers: app.providerMap, signal: stream.signal, timeoutMs: 180_000, maxOutputTokens: 400, messages: verifyMessages(claims) });
+          const applied = applyVerdicts(precise.text, claims, verdicts.text);
+          checked = applied.text;
+          if (applied.removed.length) console.warn(`Verification removed ${applied.removed.length} unsupported sentence(s).`);
+          status({ stage: "verifying", label: "Verifying result", detail: `${claims.length} claims checked · ${applied.removed.length} unsupported removed` });
+        } catch {
+          status({ stage: "verifying", label: "Verifying result", detail: "verification unavailable" });
+        }
+      }
+    }
+    // People the sources mention but do not name are always reported as not identified, never left out.
+    const completed = checked !== undefined && verifiedFacts.length ? ensureUnidentified(checked, verifiedFacts) : checked;
+    const cited = completed !== undefined ? sanitizeCitations(mentionOtherEvents(tidyAnswer(completed), matchedEvents, evidence), allowed) : first;
     const linked = sanitizeLinks(cited.text, [...sourceUrls, ...userUrls]);
-    if (cited.removed.length) console.warn(`Removed citation markers for unsupplied sources: ${cited.removed.join(", ")}`);
+    if (first.removed.length) console.warn(`Removed citation markers for unsupplied sources: ${first.removed.join(", ")}`);
     if (linked.removed.length) console.warn(`Removed ${linked.removed.length} link(s) that were not retrieved sources.`);
     const final = linked.text;
     const statusValue = event.type === "done" ? "complete" : event.type;

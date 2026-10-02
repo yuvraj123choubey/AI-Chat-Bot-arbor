@@ -2,7 +2,13 @@ import { entitySignals } from "./entities.ts";
 
 export type SearchMode = "auto" | "on" | "off";
 /** What kind of sources a question needs, which decides the search providers used. */
-export interface SearchFocus { academic: boolean; fresh: boolean; technical: boolean; official: boolean }
+export interface SearchFocus {
+  academic: boolean; fresh: boolean; technical: boolean; official: boolean;
+  /** A specific real-world event (incident, case, attack, crash…): resolve it, read deeply, extract details. */
+  event?: boolean;
+}
+/** Words naming a kind of real-world event; one of these makes a question an event lookup, whatever its casing. */
+export const eventTerms = /\b(hijack(ed|ing|er|ers)?|crash(ed|es)?|attack(ed|s)?|bomb(ing|ings|ed)?|shoot(ing|ings)|explosion|blast|earthquake|tsunami|flood(ing|s)?|wildfire|fire|storm|hurricane|cyclone|typhoon|accident|incident|collision|derail(ed|ment)|disaster|emergency|diversion|emergency landing|case|scandal|lawsuit|sued|trial|verdict|ruling|indictment|arrest(ed)?|charged|murder(ed)?|killing|assassinat(ed|ion)|kidnap(ped|ping)?|hostage|protest(s)?|riot(s)?|strike|coup|war|invasion|ceasefire|outage|breach|hack(ed)?|leak(ed)?|recall(ed)?|bankruptcy|layoffs?|merger|acquisition|resign(ed|ation)|fired|died|death|election)\b/i;
 export interface SearchIntent extends SearchFocus { search: boolean; reason: string }
 const technicalTerms = /\b(api|sdk|library|framework|npm|pip|python|javascript|typescript|java|c\+\+|c#|rust|golang|react|vue|angular|node(\.js)?|django|flask|sql|postgres|docker|kubernetes|linux|windows|git|compiler|runtime|exception|error|bug|install|configure|version)\b/i;
 
@@ -26,7 +32,8 @@ export function searchIntent(message: string, mode: SearchMode): SearchIntent {
   const entities = entitySignals(text);
   const focus: SearchFocus = {
     academic: academicTerms.test(text), fresh: fresh.test(text), technical: technicalTerms.test(text),
-    official: entities.courses.length > 0 || entities.urls.length > 0 || entities.cue || entities.properName
+    official: entities.courses.length > 0 || entities.urls.length > 0 || entities.cue || entities.properName,
+    event: eventTerms.test(text) && !notSearch.test(text) && text.split(/\s+/).length >= 2
   };
   const decide = (search: boolean, reason: string): SearchIntent => ({ search, reason, ...focus });
   if (mode === "off") return decide(false, "search turned off");
@@ -36,7 +43,9 @@ export function searchIntent(message: string, mode: SearchMode): SearchIntent {
   if (smallTalk.test(text) && text.length < 40) return decide(false, "small talk");
   if (notSearch.test(text)) return decide(false, "writing, coding or maths");
   if (personal.test(text) && !entities.cue && !entities.properName) return decide(false, "a personal task");
+  if (focus.event) return decide(true, "asks about a specific event");
   if ((entities.cue || entities.properName) && text.split(/\s+/).length >= 2) return decide(true, "mentions a specific organisation, person or fact");
+  if (/^(tell me|what do you know|give me (info|information|details)|explain what happened|what happened)\b/i.test(text) && text.split(/\s+/).length >= 4) return decide(true, "asks about a specific subject");
   if (focus.fresh) return decide(true, "time-sensitive");
   if (focus.academic) return decide(true, "asks about research");
   if (factual.test(text) && text.split(/\s+/).length >= 4) return decide(true, "factual question");

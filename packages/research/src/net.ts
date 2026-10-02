@@ -78,14 +78,55 @@ export async function safeFetch(address: string, options: SafeFetchOptions = {})
   throw new Error("Too many redirects");
 }
 
+/**
+ * Wikimedia and OpenAlex ask API clients to include a contact (an email or a project URL) and allow more requests
+ * to clients that do. Nothing is sent unless the operator sets ARBOR_CONTACT (or ARBOR_CONTACT_EMAIL).
+ */
 export function userAgent(): string {
-  const contact = process.env.ARBOR_CONTACT_EMAIL;
+  const contact = process.env.ARBOR_CONTACT || process.env.ARBOR_CONTACT_EMAIL;
   return `ArborResearch/0.1 (research assistant${contact ? `; ${contact}` : ""})`;
 }
-/** JSON GET for search APIs, with a timeout. These hosts are fixed, so the public-address agent is not needed. */
+/**
+ * JSON GET for search APIs, with a timeout. These hosts are fixed, so the public-address agent is not needed.
+ * A dropped connection, timeout, rate limit or server error is retried once after a short pause, because a single
+ * transient failure would otherwise silently remove a provider's results from an answer.
+ */
 export async function getJson(url: string | URL, headers: Record<string, string> = {}, signal?: AbortSignal, timeoutMs = 12_000): Promise<any> {
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const response = await fetch(url, { headers: { accept: "application/json", "user-agent": userAgent(), ...headers }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
-  if (!response.ok) throw Object.assign(new Error(`HTTP ${response.status} from ${new URL(url).hostname}`), { status: response.status });
-  return response.json();
+  const host = new URL(url).hostname;
+  for (let attempt = 0; ; attempt++) {
+    let pause = 900;
+    const release = await politeSlot(host, signal);
+    const timeout = AbortSignal.timeout(timeoutMs);
+    try {
+      const response = await fetch(url, { headers: { accept: "application/json", "user-agent": userAgent(), ...headers }, signal: signal ? AbortSignal.any([signal, timeout]) : timeout });
+      if (response.ok) return await response.json();
+      const error = Object.assign(new Error(`HTTP ${response.status} from ${host}`), { status: response.status });
+      if (attempt > 0 || (response.status !== 429 && response.status < 500)) throw error;
+      if (response.status === 429) pause = Math.min(10_000, Number(response.headers.get("retry-after")) * 1000 || 2500);
+    } catch (error) {
+      if (signal?.aborted || attempt > 0 || (error as { status?: number }).status) throw error;
+    } finally { release(); }
+    await new Promise(resolve => setTimeout(resolve, pause));
+  }
+}
+
+/**
+ * Wikimedia APIs ask clients to make requests one at a time, and answer bursts with "too many requests".
+ * Requests to those hosts share one queue per host: one at a time, starting at least 200 ms apart.
+ */
+const politeHosts = /(^|\.)(wikipedia|wikidata|wikimedia)\.org$/;
+const queues = new Map<string, { active: number; last: number; waiting: (() => void)[] }>();
+async function politeSlot(host: string, signal?: AbortSignal): Promise<() => void> {
+  if (!politeHosts.test(host)) return () => {};
+  const q = queues.get(host) ?? { active: 0, last: 0, waiting: [] };
+  queues.set(host, q);
+  while (q.active >= 1) {
+    await new Promise<void>(resolve => q.waiting.push(resolve));
+    signal?.throwIfAborted();
+  }
+  q.active++;
+  const wait = q.last + 200 - Date.now();
+  q.last = Math.max(Date.now(), q.last + 200);
+  if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+  return () => { q.active--; q.waiting.shift()?.(); };
 }

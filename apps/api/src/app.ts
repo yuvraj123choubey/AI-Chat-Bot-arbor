@@ -9,6 +9,7 @@ import type { AIProvider, ModelDefinition, ProviderName } from "../../../package
 import { createDb, waitForDb, type Db } from "../../../packages/db/src/client.ts";
 import { dataRoot } from "../../../packages/db/src/local.ts";
 import { searchProviders } from "../../../packages/research/src/index.ts";
+import { normalizeQuestion, type Normalized } from "../../../packages/research/src/normalize.ts";
 import type { SearchProvider } from "../../../packages/research/src/types.ts";
 import { bootstrapLocalIdentity, resolveWorkspace, type LocalIdentity } from "./repos/workspace.ts";
 import { ConversationRepo } from "./repos/conversations.ts";
@@ -31,6 +32,8 @@ export interface App {
   conversations: ConversationRepo;
   sources: SourceRepo;
   searchProviders: SearchProvider[];
+  /** Corrects misspelled or run-together names before searching (live lookups by default). */
+  normalize(text: string, signal?: AbortSignal): Promise<Normalized>;
   idleTimeoutMs: number;
   /** Conversations with a response in flight; a second concurrent request would interleave history. */
   generating: Set<string>;
@@ -40,7 +43,7 @@ export interface App {
   recordUsage(entry: Record<string, unknown>): Promise<void>;
 }
 
-export interface AppOverrides { db?: Db; providers?: AIProvider[]; registry?: ModelDefinition[]; searchProviders?: SearchProvider[]; dataRoot?: string }
+export interface AppOverrides { db?: Db; providers?: AIProvider[]; registry?: ModelDefinition[]; searchProviders?: SearchProvider[]; dataRoot?: string; normalize?: App["normalize"] }
 
 export async function createApp(overrides: AppOverrides = {}): Promise<App> {
   const providers = overrides.providers ?? [new LocalProvider(), new OpenAIProvider(), new AnthropicProvider(), new GoogleProvider(), new DeepSeekProvider()];
@@ -66,6 +69,7 @@ export async function createApp(overrides: AppOverrides = {}): Promise<App> {
     orchestrator: new Orchestrator(registry, providerMap),
     conversations, sources,
     searchProviders: overrides.searchProviders ?? searchProviders(),
+    normalize: overrides.normalize ?? normalizeQuestion,
     idleTimeoutMs: Number(process.env.PROVIDER_TIMEOUT_MS) || 180_000,
     generating: new Set(),
     chatModels: () => registry.filter(m => m.enabled && policy.has(m.provider) && providerMap.get(m.provider)?.isConfigured()),

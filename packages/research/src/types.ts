@@ -17,7 +17,11 @@ export interface SearchResult {
   fullText?: string;
   metadata?: Record<string, unknown>;
 }
-export interface SearchOptions { limit: number; signal?: AbortSignal }
+export interface SearchOptions {
+  limit: number; signal?: AbortSignal;
+  /** Prefer the newest matches (used when identifying a recent event); providers that cannot sort ignore it. */
+  recent?: boolean;
+}
 export interface SearchProvider {
   readonly id: string;
   readonly label: string;
@@ -48,5 +52,5 @@ export interface Passage { text: string; start: number; score: number }
 /** A source numbered for the model, with the passages it is allowed to see. */
 export interface EvidenceSource { ordinal: number; source: RetrievedSource; passages: Passage[] }
 
-export type ResearchStage = "searching" | "reading" | "comparing" | "writing";
+export type ResearchStage = "searching" | "resolving" | "reading" | "comparing" | "extracting" | "writing" | "verifying";
 export interface ResearchStatus { stage: ResearchStage; label: string; detail?: string }
