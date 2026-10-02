@@ -110,7 +110,7 @@ test("the pipeline searches, reads pages, and returns numbered evidence with sta
       if (url.includes("down")) throw new Error("offline");
       return { url, status: 200, contentType: "text/html", body: Buffer.from(`<html><head><title>Guide</title><meta name="author" content="A. Writer"><meta property="article:published_time" content="2025-05-01"></head><body><article><h1>Ransomware defense guide</h1>${"<p>Offline backups and patching are the core ransomware defenses for organisations of every size.</p>".repeat(8)}</article></body></html>`) };
     }
-  }, { question: "ransomware defenses", queries: ["ransomware defenses"], focus: { academic: false, fresh: false, technical: false }, depth: "balanced", onStatus: s => statuses.push(s.stage) });
+  }, { question: "ransomware defenses", queries: ["ransomware defenses"], focus: { academic: false, fresh: false, technical: false, official: false }, depth: "balanced", onStatus: s => statuses.push(s.stage) });
   assert.deepEqual(statuses, ["searching", "reading", "comparing"]);
   assert.ok(!fetched.some(u => u.includes("wiki")), "provider-supplied full text is not re-fetched");
   const guide = result.evidence.find(e => e.source.url === "https://news.example/ransomware")!;
@@ -126,10 +126,10 @@ test("the pipeline searches, reads pages, and returns numbered evidence with sta
 
 test("provider choice discloses missing web search", () => {
   const p = (id: string, coverage: SearchProvider["coverage"], configured = true): SearchProvider => ({ id, label: id, coverage, isConfigured: () => configured, search: async () => [] });
-  const without = chooseProviders([p("brave", "web", false), p("wiki", "encyclopedia"), p("openalex", "academic")], { academic: false, fresh: false, technical: false });
+  const without = chooseProviders([p("brave", "web", false), p("wiki", "encyclopedia"), p("openalex", "academic")], { academic: false, fresh: false, technical: false, official: false });
   assert.deepEqual(without.chosen.map(x => x.id), ["wiki", "openalex"]);
   assert.equal(without.notices.length, 1);
-  const withWeb = chooseProviders([p("brave", "web"), p("wiki", "encyclopedia"), p("openalex", "academic")], { academic: false, fresh: false, technical: false });
+  const withWeb = chooseProviders([p("brave", "web"), p("wiki", "encyclopedia"), p("openalex", "academic")], { academic: false, fresh: false, technical: false, official: false });
   assert.deepEqual(withWeb.chosen.map(x => x.id), ["brave", "wiki"]);
 });
 
@@ -154,4 +154,48 @@ test("the fetcher refuses private and loopback addresses, including via redirect
     await assert.rejects(safeFetch(`http://127.0.0.1:${port}/`), /non-public/);
     await assert.rejects(safeFetch(`http://localhost:${port}/`), /non-public|fetch failed/);
   } finally { server.close(); }
+});
+
+// ----------------------------------------------------------------- regression: entities, Search: Auto, links
+test("regression: Search: Auto searches course lookups (real or fake) but not conversation", async () => {
+  const real = searchIntent("course description cpre 4300 iowa state", "auto");
+  assert.equal(real.search, true);
+  assert.equal(real.official, true);
+  assert.equal(searchIntent("course description cpre 9971 iowa state", "auto").search, true, "a fake code is still checked, not judged from memory");
+  for (const chat of ["How are you doing today?", "Can you help me plan my study schedule for this week?", "thanks!"]) assert.equal(searchIntent(chat, "auto").search, false, chat);
+  assert.equal(searchIntent("Who is the president of Iowa State University?", "auto").search, true);
+  assert.equal(searchIntent("what does https://example.org/page say", "auto").search, true);
+});
+
+test("course codes are found without mistaking years, counts or versions for courses", async () => {
+  const { courseCodes, organizationName } = await import("../src/entities.ts");
+  assert.deepEqual(courseCodes("CPRE 4300, cpr e 4300, COMS2280 and math-1650a").map(c => `${c.subject} ${c.number}`), ["CPRE 4300", "CPRE 4300", "COMS 2280", "MATH 1650A"].filter((v, i, a) => a.indexOf(v) === i));
+  assert.deepEqual(courseCodes("in 2024 the top 100 companies and version 1234 since 1990"), []);
+  assert.equal(organizationName("course description cpre 4300 iowa state"), "iowa state");
+});
+
+test("catalog extraction returns the requested course only when the page really contains it", async () => {
+  const { extractCourse, courseMatcher, catalogUrls } = await import("../src/providers/official.ts");
+  const code = { subject: "CPRE", number: "4300", raw: "CPRE 4300" };
+  const page = `<html><body><nav>Menu</nav><div class="courseblock"><p class="courseblocktitle">CPRE 4300: Network Protocols and Security</p><p>Prereq: CPRE 3080. Detailed examination of networking standards.</p></div><div class="courseblock"><p>CPRE 4310: Basics of Information System Security</p></div></body></html>`;
+  const course = extractCourse(page, "https://catalog.example.edu/search/?P=CPRE%204300", code)!;
+  assert.match(course.text, /^CPRE 4300: Network Protocols and Security/);
+  assert.doesNotMatch(course.text, /4310/);
+  assert.equal(extractCourse("<html><body><p>No results found.</p></body></html>", "https://x", code), undefined);
+  assert.ok(courseMatcher(code).test("Cpr E 4300") && !courseMatcher(code).test("CPRE 43001"));
+  assert.equal(catalogUrls("www.iastate.edu", code)[0], "https://catalog.iastate.edu/search/?P=CPRE%204300");
+});
+
+test("links survive only when they point at retrieved sources or the user's own URLs", async () => {
+  const { sanitizeLinks } = await import("../src/citations.ts");
+  const out = sanitizeLinks("Read [the catalog](https://catalog.iastate.edu/search/?P=CPRE%204300), [a blog](https://made.up/x), https://fake.example/y and www.nope.com. Code: `curl https://fake.example/z`", ["https://catalog.iastate.edu/search/?P=CPRE%204300"]);
+  assert.equal(out.text, "Read [the catalog](https://catalog.iastate.edu/search/?P=CPRE%204300), a blog, and. Code: `curl https://fake.example/z`");
+  assert.equal(out.removed.length, 3);
+  assert.equal(sanitizeLinks("see https://made.up/docs?x=1", ["https://made.up/docs"]).text, "see", "a different query string is a different page");
+});
+
+test("answers that claim something doesn't exist are flagged for a search", async () => {
+  const { claimsUnverifiable } = await import("../src/intent.ts");
+  for (const claim of ["CPRE 4300 is not a recognized course code at Iowa State University.", "I couldn't find any information about that course.", "You may mean CSE 4300 instead; likely alternatives include CPE 4300.", "That law doesn't exist."]) assert.equal(claimsUnverifiable(claim), true, claim);
+  for (const fine of ["Apples are a sweet fruit grown on trees.", "Here is a plan for your week."]) assert.equal(claimsUnverifiable(fine), false, fine);
 });

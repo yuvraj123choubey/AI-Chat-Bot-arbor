@@ -23,6 +23,8 @@ export interface ChatInput {
   previousTaskKind?: TaskKind;
   /** Citation rules to add when the last user turn carries numbered sources. */
   grounding?: string;
+  /** How to treat this turn relative to the conversation (new topic, clarify an ambiguous term). */
+  contextNote?: string;
   context?: Record<string, string | undefined>;
 }
 export interface ChatDeps {
@@ -67,15 +69,23 @@ export function outputBudget(model: ModelDefinition, level: ReasoningMode): numb
   const budget = model.supportsReasoning ? Math.max(budgets[level], budgets.balanced) : budgets[level];
   return Math.min(budget, model.maxOutputTokens || budget);
 }
-export function systemPrompt(level: ReasoningMode, grounding?: string): string {
+/** Rules for answers written without retrieved sources: nothing may look like it came from an external resource. */
+export const ungroundedRules = [
+  "No web search was run for this answer, so do not include links or URLs, do not cite sources or add citation numbers,",
+  "and do not recommend specific websites or resources as if you had checked them.",
+  "Never state that a specific named thing (a course, product, person, law or organisation) does not exist or is not recognised; if you are not certain about it, say so plainly."
+].join(" ");
+
+export function systemPrompt(level: ReasoningMode, grounding?: string, contextNote?: string): string {
   return [
     "You are Arbor, an AI assistant for research, reasoning, coding and writing.",
-    "Answer the user's latest message, using the earlier conversation as context.",
+    "Answer the user's latest message, using the earlier conversation only where the message builds on it.",
     "Use Markdown when it helps: short headings, lists, and fenced code blocks with a language tag.",
     "Give the answer and the key steps that support it; do not narrate hidden reasoning.",
     "If you are unsure or lack information the question depends on, say so rather than guessing.",
     levelGuidance[level],
-    ...(grounding ? [grounding] : [])
+    grounding ?? ungroundedRules,
+    ...(contextNote ? [contextNote] : [])
   ].join(" ");
 }
 /** Providers reject empty turns, and Claude and Gemini also reject consecutive turns from the same role, so those are merged. */
@@ -113,7 +123,7 @@ export function friendlyError(code: ChatErrorCode, model?: ModelDefinition): str
 export async function* streamChat(deps: ChatDeps, input: ChatInput, signal?: AbortSignal): AsyncGenerator<ChatEvent> {
   const plan = planChat(deps.models, input);
   if ("error" in plan) { yield { type: "error", code: plan.error, message: friendlyError(plan.error) }; return; }
-  const messages: Message[] = [{ role: "system", content: systemPrompt(input.reasoningLevel, input.grounding) }, ...normalizeHistory(input.history)];
+  const messages: Message[] = [{ role: "system", content: systemPrompt(input.reasoningLevel, input.grounding, input.contextNote) }, ...normalizeHistory(input.history)];
   const fallbackFrom: string[] = [];
   for (const [index, model] of plan.candidates.entries()) {
     const idle = new AbortController();

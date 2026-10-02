@@ -1,4 +1,4 @@
-export type SourceType = "web" | "academic" | "government" | "documentation" | "news" | "forum" | "encyclopedia" | "uploaded_file" | "course_material";
+export type SourceType = "official" | "web" | "academic" | "government" | "documentation" | "news" | "forum" | "encyclopedia" | "uploaded_file" | "course_material";
 
 /** One hit from a search provider, before the page is read. */
 export interface SearchResult {
@@ -22,7 +22,7 @@ export interface SearchProvider {
   readonly id: string;
   readonly label: string;
   /** What this provider covers; the planner picks providers by intent. */
-  readonly coverage: "web" | "academic" | "encyclopedia" | "news" | "technical";
+  readonly coverage: "official" | "web" | "academic" | "encyclopedia" | "news" | "technical";
   isConfigured(): boolean;
   search(query: string, options: SearchOptions): Promise<SearchResult[]>;
 }

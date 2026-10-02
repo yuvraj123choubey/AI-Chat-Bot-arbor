@@ -7,7 +7,8 @@ import { OpenAICompatibleProvider } from "./openai-compatible.ts";
  */
 export class LocalProvider extends OpenAICompatibleProvider {
   constructor(baseUrl = process.env.LOCAL_LLM_URL || "http://127.0.0.1:11435/v1", private readonly enabled = process.env.LOCAL_LLM !== "off") {
-    super("local", `${baseUrl.replace(/\/+$/, "")}/chat/completions`, process.env.LOCAL_LLM_API_KEY || "local");
+    // Arbor's own server enforces JSON schemas with a grammar; Ollama and LM Studio accept the same field.
+    super("local", `${baseUrl.replace(/\/+$/, "")}/chat/completions`, process.env.LOCAL_LLM_API_KEY || "local", "max_tokens", "schema");
   }
   isConfigured() { return this.enabled; }
 }

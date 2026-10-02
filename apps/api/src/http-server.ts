@@ -5,11 +5,19 @@ import type { App } from "./app.ts";
 import { ndjson, readJson, RequestError, Router, send } from "./http.ts";
 import { chatRoute } from "./routes/chat.ts";
 import { libraryRoutes } from "./routes/library.ts";
+import { researchRoutes } from "./routes/research.ts";
 
 /** Builds the HTTP server for an app; the route table is the API's public surface. */
 export function createHttpServer(app: App): Server {
   const library = libraryRoutes(app);
+  const research = researchRoutes(app);
   const router = new Router()
+    .on("POST", "/api/research", research.start)
+    .on("GET", "/api/research", research.list)
+    .on("GET", "/api/research/:id", research.get)
+    .on("DELETE", "/api/research/:id", research.remove)
+    .on("GET", "/api/tasks/:id/events", research.events)
+    .on("POST", "/api/tasks/:id/cancel", research.cancel)
     .on("GET", "/api/health", ({ res }) => send(res, 200, { ok: true }))
     .on("GET", "/api/models", library.models)
     .on("GET", "/api/search/providers", library.searchStatus)

@@ -141,6 +141,7 @@ model Message {
 // ---------------------------------------------------------------- sources and citations
 
 enum SourceType {
+  official
   web
   academic
   government

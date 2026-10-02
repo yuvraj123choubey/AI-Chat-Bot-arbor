@@ -1,6 +1,8 @@
+import { entitySignals } from "./entities.ts";
+
 export type SearchMode = "auto" | "on" | "off";
 /** What kind of sources a question needs, which decides the search providers used. */
-export interface SearchFocus { academic: boolean; fresh: boolean; technical: boolean }
+export interface SearchFocus { academic: boolean; fresh: boolean; technical: boolean; official: boolean }
 export interface SearchIntent extends SearchFocus { search: boolean; reason: string }
 const technicalTerms = /\b(api|sdk|library|framework|npm|pip|python|javascript|typescript|java|c\+\+|c#|rust|golang|react|vue|angular|node(\.js)?|django|flask|sql|postgres|docker|kubernetes|linux|windows|git|compiler|runtime|exception|error|bug|install|configure|version)\b/i;
 
@@ -9,26 +11,45 @@ const fresh = /\b(latest|recent(ly)?|current(ly)?|today|tonight|yesterday|this (
 const factual = /^(who|what|when|where|which|how (many|much|did|does|do|is|are|was|were)|is|are|was|were|did|does|has|have|can|why did|list|name|compare|summari[sz]e (the )?(research|evidence|literature))\b/i;
 const academicTerms = /\b(paper|papers|study|studies|journal|peer[- ]reviewed|academic|literature( review)?|meta-?analys[ie]s|scholarly|systematic review|clinical trial|research (on|about|into)|empirical|evidence (for|on|that))\b/i;
 const notSearch = /```|\b(write|draft|compose|rewrite|rephrase|paraphrase|translate|proofread|poem|story|essay outline|joke|debug|refactor|implement|function|class|regex|sql query|stack trace|error:|prove|derive|solve|integral|equation)\b/i;
-const smallTalk = /^(hi|hello|hey|thanks|thank you|ok|okay|cool|great|good (morning|night|evening)|bye)\b/i;
+const smallTalk = /^(hi|hello|hey|thanks|thank you|ok|okay|cool|great|good (morning|night|evening)|bye|how are you|how's it going|what's up)\b/i;
+/** Requests about the user's own tasks ("help me plan my week") need no outside facts. */
+const personal = /^(can you |could you |would you |please )?(help me|let's|let us|i want|i need|i'm|i am|i'd like|i would like|remind me|plan my|organi[sz]e my)\b/i;
 
 /**
- * Deterministic, cheap decision on whether a message needs web evidence. "on" and "off" are user overrides;
- * "auto" searches for explicit requests, time-sensitive questions and factual questions, but not for writing,
- * coding, maths or small talk, which search would only slow down.
+ * Deterministic, cheap decision on whether a message needs web evidence. "on" and "off" are user overrides.
+ * "auto" always searches when the message names something checkable — a course code, a URL, an organisation,
+ * a person's role, a law, a price — because a model must not guess whether such things exist. It also searches
+ * for explicit requests, time-sensitive and factual questions, but not for writing, coding, maths or small talk.
  */
 export function searchIntent(message: string, mode: SearchMode): SearchIntent {
   const text = message.trim();
-  const focus: SearchFocus = { academic: academicTerms.test(text), fresh: fresh.test(text), technical: technicalTerms.test(text) };
+  const entities = entitySignals(text);
+  const focus: SearchFocus = {
+    academic: academicTerms.test(text), fresh: fresh.test(text), technical: technicalTerms.test(text),
+    official: entities.courses.length > 0 || entities.urls.length > 0 || entities.cue || entities.properName
+  };
   const decide = (search: boolean, reason: string): SearchIntent => ({ search, reason, ...focus });
   if (mode === "off") return decide(false, "search turned off");
   if (mode === "on") return decide(true, "search turned on");
+  if (entities.courses.length || entities.urls.length) return decide(true, "names a specific course or page");
   if (explicit.test(text)) return decide(true, "asked for sources");
   if (smallTalk.test(text) && text.length < 40) return decide(false, "small talk");
   if (notSearch.test(text)) return decide(false, "writing, coding or maths");
+  if (personal.test(text) && !entities.cue && !entities.properName) return decide(false, "a personal task");
+  if ((entities.cue || entities.properName) && text.split(/\s+/).length >= 2) return decide(true, "mentions a specific organisation, person or fact");
   if (focus.fresh) return decide(true, "time-sensitive");
   if (focus.academic) return decide(true, "asks about research");
   if (factual.test(text) && text.split(/\s+/).length >= 4) return decide(true, "factual question");
   return decide(false, "conversational");
+}
+
+/**
+ * Phrases that, in an answer written without search, assert that something does not exist or could not be
+ * found — exactly the claims a model cannot make from memory. Such an answer is checked with a search first.
+ */
+const unverifiable = /\b(not (a )?(recogni[sz]ed|real|valid|known)|(does not|doesn't|did not|didn't|do not|don't) (seem to )?(exist|appear to exist)|no (such|record of|information (about|on))|(could ?n[o']t|cannot|can't|was unable to|am unable to|unable to) (find|locate|verify|confirm)|i('m| am) not (aware of|familiar with|sure (whether|if|that))|not aware of any|as of my (last|knowledge)|(likely|possibly|perhaps) (referring|meant|a typo|confus)|might be referring|you may (mean|be thinking)|did you mean|alternatives? (such as|like|include)|(likely|possible) alternatives)\b/i;
+export function claimsUnverifiable(answer: string): boolean {
+  return unverifiable.test(answer);
 }
 
 /** Fallback queries when no model is available to write them: the question without conversational filler. */

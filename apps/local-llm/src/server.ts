@@ -11,7 +11,7 @@ import "../../api/src/setup-env.ts";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { getLlama, LlamaChat, QwenChatWrapper, resolveChatWrapper, resolveModelFile, type ChatWrapper, type LlamaContextSequence, type LlamaModel } from "node-llama-cpp";
+import { getLlama, LlamaChat, QwenChatWrapper, resolveChatWrapper, resolveModelFile, type ChatWrapper, type Llama, type LlamaContextSequence, type LlamaGrammar, type LlamaModel } from "node-llama-cpp";
 import { dataRoot } from "../../../packages/db/src/local.ts";
 import { messageText, toHistory } from "./history.ts";
 
@@ -24,7 +24,24 @@ const modelsDir = join(dataRoot, "models");
 
 type State = { phase: "downloading"; progress: number } | { phase: "loading" } | { phase: "ready"; model: string; gpu: string } | { phase: "failed"; error: string };
 let state: State = { phase: "loading" };
-let runtime: { model: LlamaModel; direct: ChatWrapper; thinking: ChatWrapper; sequences: LlamaContextSequence[] } | undefined;
+let runtime: { llama: Llama; model: LlamaModel; direct: ChatWrapper; thinking: ChatWrapper; sequences: LlamaContextSequence[] } | undefined;
+const grammars = new Map<string, Promise<LlamaGrammar>>();
+
+/**
+ * response_format support: a JSON schema becomes a llama.cpp grammar, so even a small model can only emit
+ * JSON of that shape. Unsupported schema features fall back to plain JSON mode rather than failing.
+ */
+async function grammarFor(format: ChatBody["response_format"]): Promise<LlamaGrammar | undefined> {
+  if (!runtime || !format || (format.type !== "json_schema" && format.type !== "json_object")) return undefined;
+  const schema = format.type === "json_schema" ? format.json_schema?.schema : undefined;
+  const key = schema ? JSON.stringify(schema) : "json";
+  if (!grammars.has(key)) {
+    const llama = runtime.llama;
+    grammars.set(key, (schema ? llama.createGrammarForJsonSchema(schema as never).catch(() => llama.getGrammarFor("json")) : llama.getGrammarFor("json")) as Promise<LlamaGrammar>);
+    if (grammars.size > 50) grammars.delete(grammars.keys().next().value!);
+  }
+  return grammars.get(key);
+}
 
 /** Sequences are a fixed pool (one per parallel request); requests wait for a free one. */
 const free: LlamaContextSequence[] = [];
@@ -59,7 +76,7 @@ async function load() {
     const base = resolveChatWrapper(model);
     const qwen = base instanceof QwenChatWrapper;
     runtime = {
-      model, sequences,
+      llama, model, sequences,
       direct: qwen ? new QwenChatWrapper({ thoughts: "discourage" }) : base,
       thinking: qwen ? new QwenChatWrapper({ thoughts: "auto" }) : base
     };
@@ -73,7 +90,10 @@ async function load() {
   }
 }
 
-interface ChatBody { model?: string; messages?: { role: string; content: unknown }[]; stream?: boolean; max_tokens?: number; max_completion_tokens?: number; temperature?: number }
+interface ChatBody {
+  model?: string; messages?: { role: string; content: unknown }[]; stream?: boolean; max_tokens?: number; max_completion_tokens?: number; temperature?: number;
+  response_format?: { type: string; json_schema?: { name?: string; schema?: Record<string, unknown> } };
+}
 
 async function completions(req: IncomingMessage, res: ServerResponse) {
   let raw = "";
@@ -85,7 +105,9 @@ async function completions(req: IncomingMessage, res: ServerResponse) {
     const detail = state.phase === "downloading" ? `downloading the model (${Math.floor(state.progress * 100)}%)` : state.phase === "failed" ? `failed to load: ${state.error}` : "still loading the model";
     return error(res, 503, `The local model is ${detail}.`);
   }
-  const thinking = typeof body.model === "string" && body.model.endsWith(":thinking");
+  const grammar = await grammarFor(body.response_format);
+  // Structured output is produced directly; a grammar cannot constrain a private reasoning phase.
+  const thinking = !grammar && typeof body.model === "string" && body.model.endsWith(":thinking");
   const maxTokens = Math.min(Number(body.max_completion_tokens || body.max_tokens) || 4096, contextSize);
   const abort = new AbortController();
   res.on("close", () => { if (!res.writableEnded) abort.abort(); });
@@ -100,7 +122,7 @@ async function completions(req: IncomingMessage, res: ServerResponse) {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
       const sse = (delta: Record<string, unknown>, finish: string | null = null) => res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: body.model, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
       const result = await chat.generateResponse(history, {
-        maxTokens, temperature: body.temperature ?? (thinking ? 0.6 : 0.7), signal: abort.signal, stopOnAbortSignal: true,
+        maxTokens, temperature: body.temperature ?? (thinking ? 0.6 : 0.7), signal: abort.signal, stopOnAbortSignal: true, grammar,
         onResponseChunk(chunk) {
           if (chunk.type === "segment") { if (chunk.segmentType === "thought" && chunk.text) sse({ reasoning_content: chunk.text }); }
           else if (chunk.text) sse({ content: chunk.text });
@@ -111,7 +133,7 @@ async function completions(req: IncomingMessage, res: ServerResponse) {
       res.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: body.model, choices: [], usage: usage(promptTokens, result.response) })}\n\n`);
       res.end("data: [DONE]\n\n");
     } else {
-      const result = await chat.generateResponse(history, { maxTokens, temperature: body.temperature ?? 0.3, signal: abort.signal, stopOnAbortSignal: true });
+      const result = await chat.generateResponse(history, { maxTokens, temperature: body.temperature ?? 0.3, signal: abort.signal, stopOnAbortSignal: true, grammar });
       json(res, 200, { id, object: "chat.completion", created, model: body.model, choices: [{ index: 0, message: { role: "assistant", content: result.response }, finish_reason: result.metadata.stopReason === "maxTokens" ? "length" : "stop" }], usage: usage(promptTokens, result.response) });
     }
   } catch (e) {

@@ -3,9 +3,10 @@ import { createRoot } from "react-dom/client";
 import { api, ndjsonEvents, WORKSPACE, type ChatMessage, type Level, type Model, type SearchMode, type Summary } from "./api.ts";
 import { AnswerCard } from "./components/Answer.tsx";
 import { SourceLibrary, SourcesPanel } from "./components/Sources.tsx";
+import { DeepResearch } from "./components/DeepResearch.tsx";
 import "./style.css";
 
-type View = "chat" | "sources";
+type View = "chat" | "research" | "sources";
 const starters = [
   { icon: "⌕", title: "Research a topic", prompt: "Research recent approaches to ransomware defense and cite credible sources." },
   { icon: "⌘", title: "Solve a hard problem", prompt: "Explain a rigorous approach to proving a mathematical result." },
@@ -30,6 +31,7 @@ function App() {
   const [error, setError] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [panel, setPanel] = useState<{ messageId: string; ordinal?: number } | null>(null);
+  const [researchPanel, setResearchPanel] = useState(false);
   const controller = useRef<AbortController | null>(null);
   const pending = useRef("");
   const frame = useRef(0);
@@ -99,6 +101,8 @@ function App() {
           case "sources": updateLast(m => ({ ...m, sources: event.sources })); break;
           case "model": updateLast(m => ({ ...m, meta: { providerLabel: event.model.providerLabel, displayName: event.model.displayName, modelId: event.model.modelId, reasoningLevel: event.reasoningLevel, fallbackFrom: event.fallbackFrom } })); break;
           case "thinking": updateLast(m => ({ ...m, thinking: true })); break;
+          // The server discarded an unverified draft and is searching first; the searched answer replaces it.
+          case "reset": cancelAnimationFrame(frame.current); frame.current = 0; pending.current = ""; updateLast(m => ({ ...m, content: "", thinking: false })); break;
           case "delta": pending.current += event.text; frame.current ||= requestAnimationFrame(flush); break;
           case "done": case "stopped": case "error":
             cancelAnimationFrame(frame.current); flush();
@@ -143,12 +147,13 @@ function App() {
   const groups = [...new Set(models.map(m => m.providerLabel))];
   const panelMessage = panel ? messages.find(m => m.id === panel.messageId) : undefined;
 
-  return <div className={`shell${panelMessage?.sources?.length ? " with-panel" : ""}`}>
+  return <div className={`shell${(view === "chat" && panelMessage?.sources?.length) || (view === "research" && researchPanel) ? " with-panel" : ""}`}>
     <aside className="sidebar">
       <div className="brand"><span className="brandmark">✳</span><span>arbor<span className="branddot">.</span></span></div>
       <button className="new-task" onClick={newConversation} disabled={streaming}>＋ <span>New conversation</span></button>
       <div className="nav-label">WORKSPACE</div>
       <button type="button" className={`nav-item${view === "chat" ? " active" : ""}`} onClick={() => setView("chat")}>◈ <span>Ask Arbor</span></button>
+      <button type="button" className={`nav-item${view === "research" ? " active" : ""}`} onClick={() => { setView("research"); setPanel(null); }} disabled={streaming}>◎ <span>Deep research</span></button>
       <button type="button" className={`nav-item${view === "sources" ? " active" : ""}`} onClick={() => { setView("sources"); setPanel(null); }} disabled={streaming}>⌕ <span>Sources</span></button>
       <div className="nav-item muted">▦ <span>Assignments <small>soon</small></span></div>
       <div className="nav-item muted">⌘ <span>Code workspace <small>soon</small></span></div>
@@ -160,8 +165,8 @@ function App() {
       <div className="sidebar-bottom"><div className="status-dot" /> Local workspace <span className="version">v0.2</span></div>
     </aside>
     <main className="main">
-      <header><span className="header-title">{view === "sources" ? "Sources" : title || "AI workspace"}</span><div className="header-right"><span className="model-count">{models.length} active models</span><span className="avatar">A</span></div></header>
-      {view === "sources" ? <div className="content"><SourceLibrary /></div> : <div className="content">
+      <header><span className="header-title">{view === "sources" ? "Sources" : view === "research" ? "Deep research" : title || "AI workspace"}</span><div className="header-right"><span className="model-count">{models.length} active models</span><span className="avatar">A</span></div></header>
+      {view === "sources" ? <div className="content"><SourceLibrary /></div> : view === "research" ? <div className="content"><DeepResearch models={models} onPanelChange={setResearchPanel} /></div> : <div className="content">
         {!messages.length && <><div className="eyebrow">RESEARCH · REASON · BUILD</div><h1>One workspace for<br/><em>everything you’re working on.</em></h1><p className="lede">Ask a question, untangle a tough problem, or start a project. Arbor picks the right model for the work.</p>
           <div className="cards">{starters.map(s => <button key={s.title} className="card" onClick={() => setPrompt(s.prompt)}><span className="card-icon">{s.icon}</span><strong>{s.title}</strong><span className="arrow">↗</span></button>)}</div></>}
         {messages.length > 0 && <div className="thread" aria-live="polite">
@@ -192,7 +197,7 @@ function App() {
         </div>
       </div>}
     </main>
-    {panelMessage?.sources?.length ? <SourcesPanel sources={panelMessage.sources} active={panel?.ordinal} onClose={() => setPanel(null)} /> : null}
+    {view === "chat" && panelMessage?.sources?.length ? <SourcesPanel sources={panelMessage.sources} active={panel?.ordinal} onClose={() => setPanel(null)} /> : null}
   </div>;
 }
 createRoot(document.getElementById("root")!).render(<React.StrictMode><App /></React.StrictMode>);

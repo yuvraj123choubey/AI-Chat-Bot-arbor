@@ -33,7 +33,9 @@ export interface Message { role: "system" | "user" | "assistant"; content: strin
 export interface ToolDefinition { name: string; description: string; parameters: Record<string, unknown> }
 export interface ToolCall { id: string; name: string; arguments: Record<string, unknown> }
 export interface Usage { inputTokens: number; outputTokens: number }
-export interface GenerateRequest { model: ModelDefinition; messages: Message[]; tools?: ToolDefinition[]; maxOutputTokens?: number; signal?: AbortSignal }
+/** Ask for JSON matching a schema; providers that can enforce it do, others rely on the prompt and parsing. */
+export interface ResponseFormat { name: string; schema: Record<string, unknown> }
+export interface GenerateRequest { model: ModelDefinition; messages: Message[]; tools?: ToolDefinition[]; maxOutputTokens?: number; responseFormat?: ResponseFormat; signal?: AbortSignal }
 export interface GenerateResult { text: string; toolCalls: ToolCall[]; usage: Usage }
 /**
  * `thinking` marks that the model is reasoning privately; its content is never forwarded.

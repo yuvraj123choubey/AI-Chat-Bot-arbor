@@ -39,7 +39,7 @@ export interface GatherResult { evidence: EvidenceSource[]; retrieved: Retrieved
 export function chooseProviders(all: SearchProvider[], focus: SearchFocus): { chosen: SearchProvider[]; notices: string[] } {
   const configured = all.filter(p => p.isConfigured());
   const web = configured.some(p => p.coverage === "web");
-  const wanted: Record<SearchProvider["coverage"], boolean> = { web: true, encyclopedia: true, academic: focus.academic || !web, news: focus.fresh, technical: focus.technical };
+  const wanted: Record<SearchProvider["coverage"], boolean> = { official: focus.official, web: true, encyclopedia: true, academic: focus.academic || !web, news: focus.fresh, technical: focus.technical };
   const chosen = configured.filter(p => wanted[p.coverage]);
   const notices = web ? [] : ["General web search isn't set up, so results come from free sources (Wikipedia, OpenAlex, news and Q&A archives). Set SEARXNG_URL to a SearXNG instance for full web results."];
   return { chosen, notices };
@@ -53,7 +53,9 @@ export async function gatherEvidence(deps: GatherDeps, options: GatherOptions): 
 
   status({ stage: "searching", label: "Searching", detail: options.queries.join(" · ") });
   // Rate-limited news search gets only the first query, so it adds at most one wait.
-  const settled = await Promise.allSettled(chosen.flatMap(provider => (provider.coverage === "news" ? options.queries.slice(0, 1) : options.queries).map(q => provider.search(q, { limit: budget.perProvider, signal: options.signal }))));
+  // Official-source lookup reads entities from the user's own wording; generated queries can drop the institution.
+  const queriesFor = (provider: SearchProvider) => provider.coverage === "official" ? [options.question] : provider.coverage === "news" ? options.queries.slice(0, 1) : options.queries;
+  const settled = await Promise.allSettled(chosen.flatMap(provider => queriesFor(provider).map(q => provider.search(q, { limit: budget.perProvider, signal: options.signal }))));
   options.signal?.throwIfAborted();
   const results = settled.flatMap(s => s.status === "fulfilled" ? s.value : []);
   const failed = settled.filter(s => s.status === "rejected").length;
@@ -102,10 +104,18 @@ export function rankCandidates(candidates: Candidate[], question: string, querie
   const lexical = candidates.map((_, i) => bm25.score(i, terms));
   const maxLexical = Math.max(...lexical, 1e-9);
   const maxFusion = Math.max(...candidates.map(c => c.fusion));
-  return candidates.map((c, i) => ({ c, score: 0.6 * c.fusion / maxFusion + 0.4 * lexical[i] / maxLexical }))
+  return candidates.map((c, i) => ({ c, score: (0.6 * c.fusion / maxFusion + 0.4 * lexical[i] / maxLexical) * authority(c.result) }))
     .sort((a, b) => b.score - a.score).map(x => x.c);
 }
 
+/** Homework-mirror and answer-farm sites copy primary material without authority; they rank below it. */
+export const lowAuthorityHosts = /(^|\.)(coursehero\.com|chegg\.com|studocu\.com|quizlet\.com|scribd\.com|brainly\.com|numerade\.com|bartleby\.com|studypool\.com|gradesaver\.com|ipl\.org|essaypro\.com|ukessays\.com)$/;
+/** Ranking weight for primary sources: official pages first, then scholarly and government sources. */
+export function authority(result: { sourceType?: string; url: string }): number {
+  if (result.sourceType === "official") return 2;
+  if (lowAuthorityHosts.test(domainOf(result.url))) return 0.4;
+  return result.sourceType === "academic" || result.sourceType === "government" ? 1.15 : 1;
+}
 async function readCandidate(deps: GatherDeps, candidate: Candidate, signal?: AbortSignal): Promise<RetrievedSource> {
   const r = candidate.result;
   const base: RetrievedSource = {
@@ -115,6 +125,8 @@ async function readCandidate(deps: GatherDeps, candidate: Candidate, signal?: Ab
   };
   if (r.fullText && r.fullText.length > 1500) return base;
   if (r.provider === "openalex") return base;
+  // Official results were already read and trimmed to the relevant entry (e.g. one course in a catalog).
+  if (r.sourceType === "official" && r.fullText) return { ...base, readMode: "page" };
   try {
     const resource = await (deps.fetch || ((url, s) => safeFetch(url, { signal: s })))(r.url, signal);
     if (resource.status >= 400) return base;

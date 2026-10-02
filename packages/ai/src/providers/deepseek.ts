@@ -6,6 +6,6 @@ import { OpenAICompatibleProvider } from "./openai-compatible.ts";
  */
 export class DeepSeekProvider extends OpenAICompatibleProvider {
   constructor(key = process.env.DEEPSEEK_API_KEY, baseUrl = process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com") {
-    super("deepseek", `${baseUrl.replace(/\/+$/, "")}/chat/completions`, key);
+    super("deepseek", `${baseUrl.replace(/\/+$/, "")}/chat/completions`, key, "max_tokens", "object");
   }
 }

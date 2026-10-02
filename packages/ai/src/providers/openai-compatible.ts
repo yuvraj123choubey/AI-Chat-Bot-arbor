@@ -1,15 +1,21 @@
 import { BaseProvider, ProviderError, postJson, parseSse } from "./base.ts";
 import type { GenerateRequest, GenerateResult, ProviderName, StreamChunk, ToolCall } from "../types.ts";
 
+/** How a server can be held to a JSON response: by schema (OpenAI, Arbor's local server), generic JSON mode (DeepSeek), or not at all. */
+export type JsonMode = "schema" | "object" | "none";
+
 export class OpenAICompatibleProvider extends BaseProvider {
   /** OpenAI expects `max_completion_tokens`; DeepSeek and most compatible APIs use `max_tokens`. */
-  constructor(public readonly name: ProviderName, private readonly url: string, private readonly key: string | undefined, private readonly maxTokensField = "max_tokens") { super(); }
+  constructor(public readonly name: ProviderName, private readonly url: string, private readonly key: string | undefined, private readonly maxTokensField = "max_tokens", private readonly jsonMode: JsonMode = "none") { super(); }
   isConfigured() { return Boolean(this.key); }
   protected body(request: GenerateRequest, stream = false) {
+    const format = request.responseFormat;
     return {
       model: request.model.modelId,
       messages: request.messages,
       ...(request.maxOutputTokens ? { [this.maxTokensField]: request.maxOutputTokens } : {}),
+      ...(format && this.jsonMode === "schema" ? { response_format: { type: "json_schema", json_schema: { name: format.name, schema: format.schema, strict: false } } } : {}),
+      ...(format && this.jsonMode === "object" ? { response_format: { type: "json_object" } } : {}),
       ...(request.tools?.length ? { tools: request.tools.map(t => ({ type: "function", function: t })) } : {}),
       stream,
       ...(stream ? { stream_options: { include_usage: true } } : {})

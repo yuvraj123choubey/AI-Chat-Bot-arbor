@@ -36,6 +36,34 @@ export function sanitizeCitations(text: string, allowed: Set<number>): Sanitized
   return { text: cleaned, cited: [...cited].sort((a, b) => a - b), removed: [...removed].sort((a, b) => a - b) };
 }
 
+/**
+ * Links are allowed only to real, retrieved sources or to URLs the user supplied. Any other Markdown link keeps
+ * its text without the URL; any other bare URL or "www." address is removed. Code is left untouched.
+ */
+export function sanitizeLinks(text: string, allowedUrls: Iterable<string>): { text: string; removed: string[] } {
+  const allowed = new Set([...allowedUrls].map(normaliseLink));
+  const removed: string[] = [];
+  const ok = (url: string) => allowed.has(normaliseLink(url));
+  const cleaned = outsideCode(text, prose => prose
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (whole, label: string, url: string) => {
+      if (ok(url)) return whole;
+      removed.push(url);
+      return label;
+    })
+    .replace(/(?<!\]\()(?<![\w/])((?:https?:\/\/|www\.)[^\s<>()[\]"']+[^\s<>()[\]"'.,;:!?])/gi, (url: string) => {
+      if (ok(url)) return url;
+      removed.push(url);
+      return "";
+    })
+    .replace(/\(\s*\)/g, "").replace(/[ \t]{2,}/g, " ").replace(/ +([.,;:])/g, "$1").replace(/[ \t]+$/gm, ""));
+  return { text: cleaned, removed };
+}
+function normaliseLink(url: string): string {
+  let value = url.trim();
+  try { value = decodeURI(value); } catch { /* keep as written */ }
+  return value.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/#.*$/, "").replace(/\/+(?=$|\?)/, "");
+}
+
 export interface CitationClaim { ordinal: number; claim: string }
 /** The sentence each valid marker is attached to, for storing Citation rows. */
 export function citationClaims(text: string, allowed: Set<number>): CitationClaim[] {

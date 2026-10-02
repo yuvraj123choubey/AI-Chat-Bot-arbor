@@ -71,7 +71,8 @@ export function queryTerms(question: string, queries: string[]): Map<string, num
   return terms;
 }
 
-const typePrior: Partial<Record<SourceType, number>> = { academic: 1.12, government: 1.1, documentation: 1.08, encyclopedia: 1.03, news: 1.02, forum: 0.92 };
+const typePrior: Partial<Record<SourceType, number>> = { official: 1.6, academic: 1.12, government: 1.1, documentation: 1.08, encyclopedia: 1.03, news: 1.02, forum: 0.92 };
+const lowAuthority = /(^|\.)(coursehero\.com|chegg\.com|studocu\.com|quizlet\.com|scribd\.com|brainly\.com|numerade\.com|bartleby\.com|studypool\.com)$/;
 export interface EvidenceLimits { maxSources: number; perSource: number; maxPassages: number }
 
 /**
@@ -97,7 +98,7 @@ export function selectEvidence(sources: RetrievedSource[], question: string, que
   }
   const domains = new Map<string, number>();
   const ranked = [...perSource.entries()]
-    .map(([i, passages]) => ({ i, passages, score: passages[0].score * (typePrior[sources[i].sourceType] ?? 1) }))
+    .map(([i, passages]) => ({ i, passages, score: passages[0].score * (typePrior[sources[i].sourceType] ?? 1) * (lowAuthority.test(sources[i].domain) ? 0.5 : 1) }))
     .sort((a, b) => b.score - a.score)
     .map(entry => {
       const seen = domains.get(sources[entry.i].domain) || 0;

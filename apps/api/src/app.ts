@@ -14,8 +14,13 @@ import { bootstrapLocalIdentity, resolveWorkspace, type LocalIdentity } from "./
 import { ConversationRepo } from "./repos/conversations.ts";
 import { SourceRepo } from "./repos/sources.ts";
 import { importLegacyConversations } from "./repos/legacy-import.ts";
+import { ResearchRepo } from "./repos/research.ts";
+import { TaskEngine } from "./tasks/engine.ts";
+import { deepResearchHandler } from "./tasks/deep-research.ts";
 
 export interface App {
+  tasks: TaskEngine;
+  research: ResearchRepo;
   db: Db;
   identity: LocalIdentity;
   registry: ModelDefinition[];
@@ -49,11 +54,17 @@ export async function createApp(overrides: AppOverrides = {}): Promise<App> {
   const imported = await importLegacyConversations(db, identity, overrides.dataRoot ?? dataRoot);
   if (imported) console.log(`Imported ${imported} conversation(s) from the earlier file store (originals kept in data/backup/).`);
   await conversations.markInterrupted();
+  const sources = new SourceRepo(db);
+  const research = new ResearchRepo(db, sources);
+  // One deep research task at a time keeps the local model responsive for chat.
+  const tasks = new TaskEngine(db, Number(process.env.TASK_CONCURRENCY) || 1);
+  await tasks.recoverInterrupted();
+  await research.markInterrupted();
 
   const app: App = {
-    db, identity, registry, providers, providerMap, policy,
+    db, identity, registry, providers, providerMap, policy, tasks, research,
     orchestrator: new Orchestrator(registry, providerMap),
-    conversations, sources: new SourceRepo(db),
+    conversations, sources,
     searchProviders: overrides.searchProviders ?? searchProviders(),
     idleTimeoutMs: Number(process.env.PROVIDER_TIMEOUT_MS) || 180_000,
     generating: new Set(),
@@ -72,6 +83,7 @@ export async function createApp(overrides: AppOverrides = {}): Promise<App> {
       }).catch(error => console.warn("Could not record usage:", error instanceof Error ? error.message : error));
     }
   };
+  tasks.register("deep_research", deepResearchHandler(app));
   return app;
 }
 

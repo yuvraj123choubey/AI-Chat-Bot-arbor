@@ -20,7 +20,20 @@ class StubProvider implements AIProvider {
   isConfigured() { return true; }
   async generate(request: GenerateRequest) {
     this.requests.push(request);
-    return { text: '{"queries": ["ransomware backup defenses"]}', toolCalls: [], usage: { inputTokens: 5, outputTokens: 5 } };
+    const reply = (text: string) => ({ text, toolCalls: [], usage: { inputTokens: 5, outputTokens: 5 } });
+    const user = request.messages.filter(m => m.role === "user").map(m => m.content).join("\n");
+    if (user.includes("[slow]")) await new Promise((resolve, reject) => { const t = setTimeout(resolve, 5000); request.signal?.addEventListener("abort", () => { clearTimeout(t); reject(request.signal!.reason); }); });
+    switch (request.responseFormat?.name) {
+      case "research_plan": return reply(JSON.stringify({ objective: "Understand ransomware defenses", subquestions: [{ question: "Which backups work against ransomware?", queries: ["ransomware backups"] }] }));
+      case "research_notes": {
+        const first = Number(user.match(/^\[(\d+)\]/m)?.[1] ?? 1);
+        return reply(JSON.stringify({ findings: [{ claim: "Offline backups allow recovery without paying.", sources: [first] }], gaps: [] }));
+      }
+      case "research_gaps": return reply(JSON.stringify({ missing: [], conflicts: [] }));
+    }
+    if (request.messages[0].content.startsWith("You write research reports")) return reply("## Summary\nOffline backups allow recovery [1]. Made-up claim [8].");
+    if (request.messages[0].content.startsWith("You take research notes")) return reply(`- Offline backups allow recovery without paying. [${Number(user.match(/^\[(\d+)\]/m)?.[1] ?? 1)}]`);
+    return reply('{"queries": ["ransomware backup defenses"]}');
   }
   async *stream(request: GenerateRequest): AsyncIterable<StreamChunk> {
     this.requests.push(request);
@@ -32,7 +45,11 @@ class StubProvider implements AIProvider {
         await new Promise(r => setTimeout(r, 20));
       }
     }
-    const text = last.includes("<<<") ? "Offline backups are the key defense [1]. Patching matters too [2, 7]. Invented claim [9]." : `Echo: ${last}`;
+    const text = last.includes("<<<")
+      ? (last.includes("CPRE 4300") ? "CPRE 4300 is Network Protocols and Security [1]." : "Offline backups are the key defense [1]. Patching matters too [2, 7]. Invented claim [9].")
+      : last.includes("zorblax") ? "The zorblax protocol does not exist, as far as I know."
+      : last.includes("linkbait") ? "See [the docs](https://made.up/docs) or https://another.fake/page for more [3]. Also www.fake-site.com."
+      : `Echo: ${last}`;
     for (const word of text.split(" ")) yield { text: `${word} ` };
     yield { usage: { inputTokens: 100, outputTokens: 20 } };
   }
@@ -40,6 +57,17 @@ class StubProvider implements AIProvider {
   reason(request: GenerateRequest) { return this.generate(request); }
   analyzeCode(request: GenerateRequest) { return this.generate(request); }
 }
+/** Stands in for the official-source lookup and records the question it was asked to resolve. */
+const officialQuestions: string[] = [];
+const official: SearchProvider = {
+  id: "stub-official", label: "Stub official", coverage: "official", isConfigured: () => true,
+  async search(query) {
+    officialQuestions.push(query);
+    return /cpre\s?4300/i.test(query)
+      ? [{ url: "https://catalog.example.edu/search/?P=CPRE%204300", title: "CPRE 4300: Network Protocols and Security", snippet: "CPRE 4300", provider: "stub-official", query, rank: 0, sourceType: "official", fullText: "CPRE 4300: Network Protocols and Security. Prereq: CPRE 3080 or COMS 2520. Detailed examination of networking standards and protocols." }]
+      : [];
+  }
+};
 const search: SearchProvider = {
   id: "stub-search", label: "Stub search", coverage: "encyclopedia", isConfigured: () => true,
   async search(query) {
@@ -63,7 +91,7 @@ before(async () => {
     messages: [{ id: "22222222-2222-4222-8222-222222222222", role: "user", content: "old question", createdAt: "2026-01-01T00:00:00Z" },
       { id: "33333333-3333-4333-8333-333333333333", role: "assistant", content: "old answer", createdAt: "2026-01-01T00:00:01Z", status: "complete" }]
   }));
-  app = await createApp({ db: testDb.db, providers: [provider], registry: [model], searchProviders: [search], dataRoot: testDb.dataRoot });
+  app = await createApp({ db: testDb.db, providers: [provider], registry: [model], searchProviders: [official, search], dataRoot: testDb.dataRoot });
   server = createHttpServer(app).listen(0, "127.0.0.1");
   await new Promise(r => server.once("listening", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -179,4 +207,114 @@ test("conversations can be renamed and deleted; validation errors are clear", as
   assert.equal((await chat({ message: "x", selectedModel: "nope" })).status, 400);
   assert.equal((await chat({ message: "x", searchMode: "sometimes" })).status, 400);
   assert.equal((await fetch(`${base}/api/chat`, { method: "POST", headers: { "content-type": "text/plain" }, body: "{}" })).status, 415);
+});
+
+async function followTask(taskId: string) {
+  const res = await fetch(`${base}/api/tasks/${taskId}/events`);
+  const events: any[] = [];
+  const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    buffer += read.value;
+    const lines = buffer.split("\n"); buffer = lines.pop()!;
+    for (const line of lines.filter(Boolean)) events.push(JSON.parse(line));
+  }
+  return events;
+}
+const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+test("deep research runs as a task: live events, stored plan, numbered sources, notes and a checked report", async () => {
+  const started = await post("/api/research", { question: "How do organisations recover from ransomware?" });
+  assert.equal(started.status, 202);
+  const { researchId, taskId } = await started.json();
+  const events = await followTask(taskId);
+  assert.equal(events[0].type, "snapshot");
+  assert.equal(events.at(-1).status, "completed");
+  const types = new Set(events.map(e => e.type));
+  for (const t of ["step", "progress", "plan", "sources", "notes", "report"]) assert.ok(types.has(t), `event ${t}`);
+
+  const research = await get(`/api/research/${researchId}`);
+  assert.equal(research.status, "completed");
+  assert.equal(research.plan.subquestions[0].question, "Which backups work against ransomware?");
+  assert.deepEqual(research.queries, ["ransomware backups"]);
+  assert.equal(research.report.trim(), "## Summary\nOffline backups allow recovery [1]. Made-up claim.");
+  assert.deepEqual(research.sources.map((s: any) => [s.ordinal, s.cited]).slice(0, 2), [[1, true], [2, false]]);
+  assert.equal(research.notes[0].content, "Offline backups allow recovery without paying.");
+  assert.deepEqual(research.steps.map((s: any) => [s.kind, s.status]), [["plan", "completed"], ["search", "completed"], ["notes", "completed"], ["gaps", "completed"], ["report", "completed"]]);
+  assert.ok(await app.db.agentRun.count({ where: { taskId } }) >= 3);
+  assert.ok((await get("/api/research")).some((r: any) => r.id === researchId));
+  // A finished task's event stream returns the snapshot and ends.
+  const replay = await followTask(taskId);
+  assert.deepEqual(replay.map(e => e.type), ["snapshot"]);
+});
+
+test("deep research can be cancelled and deleted", async () => {
+  const { researchId, taskId } = await (await post("/api/research", { question: "Slow question about ransomware [slow]" })).json();
+  await new Promise(r => setTimeout(r, 300));
+  assert.equal((await (await post(`/api/tasks/${taskId}/cancel`, {})).json()).cancelled, true);
+  const events = await followTask(taskId);
+  assert.equal(events.at(-1).status ?? events[0].status, "cancelled");
+  assert.equal((await get(`/api/research/${researchId}`)).status, "cancelled");
+  assert.equal((await fetch(`${base}/api/research/${researchId}`, { method: "DELETE" })).status, 200);
+  assert.equal((await fetch(`${base}/api/research/${researchId}`)).status, 404);
+  assert.equal((await post("/api/research", { question: "hi" })).status, 400);
+});
+
+// ----------------------------------------------------------------- regression: search for entities, context, links
+const lastAnswerRequest = () => provider.requests.filter(r => !r.responseFormat && !r.messages[0].content.startsWith("You write web search queries")).at(-1)!;
+
+test("regression: a course lookup searches automatically and cites the official catalog", async () => {
+  const { events } = await chat({ message: "course description cpre 4300 iowa state" });
+  assert.ok(events.some(e => e.type === "status" && e.stage === "searching"), "Search: Auto ran a search");
+  assert.ok(officialQuestions.includes("course description cpre 4300 iowa state"));
+  const sources = events.find(e => e.type === "sources").sources;
+  assert.equal(sources[0].source.sourceType, "official");
+  assert.equal(events.find(e => e.type === "done").cited[0], 1);
+});
+
+test("regression: 'apple' after the course question asks for clarification without the earlier context", async () => {
+  const first = await chat({ message: "course description cpre 4300 iowa state" });
+  const before = officialQuestions.length;
+  const { events } = await chat({ conversationId: first.conversationId, message: "apple" });
+  assert.ok(!events.some(e => e.type === "status"), "no search for a bare ambiguous word");
+  assert.equal(officialQuestions.length, before);
+  const request = lastAnswerRequest();
+  assert.deepEqual(request.messages.slice(1).map(m => m.content), ["apple"], "earlier turns are not sent");
+  assert.match(request.messages[0].content, /Ask briefly which meaning/);
+  assert.doesNotMatch(JSON.stringify(request.messages), /4300|iowa/i);
+});
+
+test("regression: 'what are its prerequisites?' keeps the course context and searches for it", async () => {
+  const first = await chat({ message: "course description cpre 4300 iowa state" });
+  const { events } = await chat({ conversationId: first.conversationId, message: "what are its prerequisites?" });
+  assert.ok(events.some(e => e.type === "status" && e.stage === "searching"));
+  assert.match(officialQuestions.at(-1)!, /cpre 4300 iowa state\nwhat are its prerequisites\?/);
+  const request = lastAnswerRequest();
+  assert.equal(request.messages.filter(m => m.role !== "system").length, 3, "the earlier exchange is included");
+});
+
+test("regression: 'apple the fruit' gets a fresh context with nothing about Iowa State", async () => {
+  const first = await chat({ message: "course description cpre 4300 iowa state" });
+  const { events } = await chat({ conversationId: first.conversationId, message: "apple the fruit", searchMode: "off" });
+  const request = lastAnswerRequest();
+  assert.deepEqual(request.messages.slice(1).map(m => m.content), ["apple the fruit"]);
+  assert.match(request.messages[0].content, /starts a new topic/);
+  assert.doesNotMatch(events.find(e => e.type === "done").content ?? events.filter(e => e.type === "delta").map(e => e.text).join(""), /iowa|4300/i);
+});
+
+test("regression: answers without search keep no invented links or citation numbers", async () => {
+  const { events, conversationId } = await chat({ message: "linkbait question", searchMode: "off" });
+  const done = events.find(e => e.type === "done");
+  assert.equal(done.content.trim(), "See the docs or for more. Also.");
+  const stored = (await get(`/api/conversations/${conversationId}`)).messages[1].content;
+  assert.doesNotMatch(stored, /https?:|www\.|\[\d+\]/);
+  assert.match(lastAnswerRequest().messages[0].content, /No web search was run for this answer/);
+});
+
+test("regression: an unsearched 'does not exist' answer triggers a search and is replaced", async () => {
+  const { events } = await chat({ message: "tell me about the zorblax protocol" });
+  const types = events.map(e => e.type);
+  assert.ok(types.indexOf("reset") > types.indexOf("delta"), "the first draft streamed, then was reset");
+  assert.ok(types.indexOf("sources") > types.indexOf("reset"), "search ran after the reset");
+  assert.doesNotMatch(events.find(e => e.type === "done").content ?? "", /does not exist/);
 });
