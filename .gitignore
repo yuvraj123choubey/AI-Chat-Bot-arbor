@@ -6,3 +6,4 @@ data/
 .npm-cache/
 .env.*
 !.env.example
+packages/db/generated/

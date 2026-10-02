@@ -1,0 +1,630 @@
+// Arbor's shared data model. One backend serves the web app, the browser extension and future desktop agent,
+// so every user-owned record hangs off a Workspace that a User belongs to.
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../generated"
+  moduleFormat        = "esm"
+  importFileExtension = "ts"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------- accounts
+
+model User {
+  id          String       @id @default(uuid())
+  email       String?      @unique
+  name        String
+  createdAt   DateTime     @default(now())
+  memberships Membership[]
+  devices     Device[]
+  tasks       Task[]
+}
+
+enum MemberRole {
+  owner
+  editor
+  viewer
+}
+
+model Workspace {
+  id               String            @id @default(uuid())
+  /// Short stable handle used by clients, e.g. "default".
+  slug             String            @unique
+  name             String
+  createdAt        DateTime          @default(now())
+  memberships      Membership[]
+  conversations    Conversation[]
+  sources          Source[]
+  researchProjects ResearchProject[]
+  tasks            Task[]
+  documents        Document[]
+  courses          Course[]
+  projects         Project[]
+  artifacts        Artifact[]
+  computerSessions ComputerSession[]
+  usageEvents      UsageEvent[]
+}
+
+model Membership {
+  userId      String
+  workspaceId String
+  role        MemberRole @default(owner)
+  createdAt   DateTime   @default(now())
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@id([userId, workspaceId])
+}
+
+enum DeviceKind {
+  browser_extension
+  desktop_agent
+}
+
+/// A paired client. Only a hash of its bearer token is stored.
+model Device {
+  id                String                    @id @default(uuid())
+  userId            String
+  kind              DeviceKind
+  name              String
+  tokenHash         String                    @unique
+  createdAt         DateTime                  @default(now())
+  lastSeenAt        DateTime?
+  revokedAt         DateTime?
+  user              User                      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  extensionSessions BrowserExtensionSession[]
+  computerSessions  ComputerSession[]
+}
+
+model BrowserExtensionSession {
+  id         String   @id @default(uuid())
+  deviceId   String
+  startedAt  DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  /// Browser and active-tab details reported by the extension.
+  info       Json     @default("{}")
+  device     Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------- conversations
+
+model Conversation {
+  id          String          @id @default(uuid())
+  workspaceId String
+  title       String
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  research    ResearchProject[]
+
+  @@index([workspaceId, updatedAt])
+}
+
+enum MessageRole {
+  user
+  assistant
+}
+
+enum MessageStatus {
+  complete
+  stopped
+  error
+}
+
+model Message {
+  id             String          @id @default(uuid())
+  conversationId String
+  /// Order within the conversation; regenerate deletes trailing rows.
+  position       Int
+  role           MessageRole
+  content        String
+  status         MessageStatus?
+  stop           String?
+  error          String?
+  /// Which model answered, reasoning level, task kind, fallback chain.
+  meta           Json?
+  /// Research status steps shown with the answer.
+  steps          Json?
+  createdAt      DateTime        @default(now())
+  conversation   Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sources        MessageSource[]
+  citations      Citation[]
+
+  @@unique([conversationId, position])
+}
+
+// ---------------------------------------------------------------- sources and citations
+
+enum SourceType {
+  web
+  academic
+  government
+  documentation
+  news
+  forum
+  encyclopedia
+  uploaded_file
+  course_material
+}
+
+model Source {
+  id              String          @id @default(uuid())
+  workspaceId     String
+  url             String
+  /// Normalised URL used to de-duplicate a source across searches.
+  canonicalUrl    String
+  title           String
+  domain          String
+  author          String?
+  publisher       String?
+  publicationDate DateTime?
+  retrievedAt     DateTime        @default(now())
+  snippet         String          @default("")
+  fullText        String?
+  sourceType      SourceType      @default(web)
+  searchQuery     String?
+  /// Search provider, DOI, page counts and other provider-specific fields.
+  metadata        Json            @default("{}")
+  /// Saved explicitly by the user (from chat, research or the extension), not just retrieved.
+  saved           Boolean         @default(false)
+  documentId      String?
+  createdAt       DateTime        @default(now())
+  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  document        Document?       @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  messages        MessageSource[]
+  citations       Citation[]
+  researchSources ResearchSource[]
+
+  @@unique([workspaceId, canonicalUrl])
+}
+
+/// The numbered sources supplied to the model for one answer; `ordinal` is the [n] the model may cite.
+model MessageSource {
+  messageId String
+  sourceId  String
+  ordinal   Int
+  /// Excerpts the model was shown, so citations can be traced to the exact evidence.
+  evidence  Json    @default("[]")
+  cited     Boolean @default(false)
+  message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  source    Source  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, sourceId])
+  @@unique([messageId, ordinal])
+}
+
+/// One inline citation marker, resolved by the backend to a supplied source.
+model Citation {
+  id                String           @id @default(uuid())
+  sourceId          String
+  messageId         String?
+  researchProjectId String?
+  ordinal           Int
+  /// The sentence or claim that carries the marker.
+  claim             String
+  /// Page, section or chunk location for document sources.
+  locator           Json?
+  createdAt         DateTime         @default(now())
+  source            Source           @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  message           Message?         @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  researchProject   ResearchProject? @relation(fields: [researchProjectId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------- research
+
+enum ResearchStatus {
+  planning
+  running
+  completed
+  failed
+  cancelled
+}
+
+model ResearchProject {
+  id             String           @id @default(uuid())
+  workspaceId    String
+  conversationId String?
+  taskId         String?          @unique
+  question       String
+  status         ResearchStatus   @default(planning)
+  plan           Json?
+  queries        Json             @default("[]")
+  report         String?
+  error          String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  workspace      Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  conversation   Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  task           Task?            @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  sources        ResearchSource[]
+  notes          ResearchNote[]
+  citations      Citation[]
+}
+
+model ResearchSource {
+  researchProjectId String
+  sourceId          String
+  ordinal           Int
+  relevance         Float?
+  researchProject   ResearchProject @relation(fields: [researchProjectId], references: [id], onDelete: Cascade)
+  source            Source          @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@id([researchProjectId, sourceId])
+  @@unique([researchProjectId, ordinal])
+}
+
+model ResearchNote {
+  id                String          @id @default(uuid())
+  researchProjectId String
+  /// Ordinals of the sources this finding rests on.
+  sourceOrdinals    Int[]
+  topic             String?
+  content           String
+  createdAt         DateTime        @default(now())
+  researchProject   ResearchProject @relation(fields: [researchProjectId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------- task engine
+
+enum TaskStatus {
+  queued
+  running
+  waiting_approval
+  completed
+  failed
+  cancelled
+}
+
+model Task {
+  id           String           @id @default(uuid())
+  workspaceId  String
+  userId       String?
+  parentTaskId String?
+  type         String
+  status       TaskStatus       @default(queued)
+  title        String
+  input        Json             @default("{}")
+  output       Json?
+  error        String?
+  createdAt    DateTime         @default(now())
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  workspace    Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  parent       Task?            @relation("Subtasks", fields: [parentTaskId], references: [id], onDelete: Cascade)
+  subtasks     Task[]           @relation("Subtasks")
+  steps        TaskStep[]
+  agentRuns    AgentRun[]
+  research     ResearchProject?
+  approvals    ApprovalRequest[]
+  artifacts    Artifact[]
+
+  @@index([workspaceId, createdAt])
+  @@index([status])
+}
+
+model TaskStep {
+  id         String     @id @default(uuid())
+  taskId     String
+  ordinal    Int
+  kind       String
+  title      String
+  status     TaskStatus @default(queued)
+  input      Json       @default("{}")
+  output     Json?
+  error      String?
+  startedAt  DateTime?
+  finishedAt DateTime?
+  task       Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, ordinal])
+}
+
+model AgentRun {
+  id           String     @id @default(uuid())
+  taskId       String?
+  agent        String
+  provider     String?
+  model        String?
+  status       TaskStatus @default(running)
+  inputTokens  Int        @default(0)
+  outputTokens Int        @default(0)
+  costUsd      Float?
+  startedAt    DateTime   @default(now())
+  finishedAt   DateTime?
+  task         Task?      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  toolCalls    ToolCall[]
+}
+
+model ToolCall {
+  id         String    @id @default(uuid())
+  agentRunId String
+  tool       String
+  input      Json      @default("{}")
+  output     Json?
+  status     String    @default("ok")
+  error      String?
+  createdAt  DateTime  @default(now())
+  agentRun   AgentRun  @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+}
+
+model UsageEvent {
+  id             String    @id @default(uuid())
+  workspaceId    String?
+  conversationId String?
+  taskId         String?
+  provider       String
+  model          String
+  registryId     String?
+  task           String?
+  role           String?
+  status         String
+  inputTokens    Int       @default(0)
+  outputTokens   Int       @default(0)
+  costUsd        Float?
+  createdAt      DateTime  @default(now())
+  workspace      Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+}
+
+// ---------------------------------------------------------------- files
+
+enum DocumentKind {
+  upload
+  course_material
+  assignment_instructions
+  rubric
+  lecture
+}
+
+enum DocumentStatus {
+  processing
+  ready
+  failed
+}
+
+model Document {
+  id           String          @id @default(uuid())
+  workspaceId  String
+  courseId     String?
+  assignmentId String?
+  kind         DocumentKind    @default(upload)
+  name         String
+  mimeType     String
+  sizeBytes    Int
+  sha256       String
+  /// Path of the stored original, relative to the server's storage root.
+  storagePath  String
+  pageCount    Int?
+  status       DocumentStatus  @default(processing)
+  error        String?
+  createdAt    DateTime        @default(now())
+  workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  course       Course?         @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  assignment   Assignment?     @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  chunks       DocumentChunk[]
+  sources      Source[]
+  requirements AssignmentRequirement[]
+
+  @@unique([workspaceId, sha256])
+}
+
+model DocumentChunk {
+  id          String   @id @default(uuid())
+  documentId  String
+  ordinal     Int
+  text        String
+  page        Int?
+  section     String?
+  /// Embedding vector; similarity is computed by the retrieval layer (swap for pgvector when available).
+  embedding   Float[]
+  tokenCount  Int      @default(0)
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, ordinal])
+}
+
+// ---------------------------------------------------------------- assignments
+
+model Course {
+  id          String       @id @default(uuid())
+  workspaceId String
+  name        String
+  code        String?
+  term        String?
+  instructor  String?
+  createdAt   DateTime     @default(now())
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  assignments Assignment[]
+  documents   Document[]
+}
+
+enum AssignmentStatus {
+  not_started
+  in_progress
+  submitted
+  graded
+}
+
+model Assignment {
+  id           String                  @id @default(uuid())
+  courseId     String
+  title        String
+  dueAt        DateTime?
+  status       AssignmentStatus        @default(not_started)
+  notes        String?
+  createdAt    DateTime                @default(now())
+  updatedAt    DateTime                @updatedAt
+  course       Course                  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  documents    Document[]
+  requirements AssignmentRequirement[]
+}
+
+enum RequirementKind {
+  requirement
+  deliverable
+  rubric_criterion
+  citation_rule
+  formatting
+  deadline
+}
+
+enum RequirementStatus {
+  todo
+  in_progress
+  done
+}
+
+/// Every requirement is quoted from an uploaded instruction or rubric document, so none can be invented.
+model AssignmentRequirement {
+  id           String            @id @default(uuid())
+  assignmentId String
+  kind         RequirementKind
+  text         String
+  /// Verbatim text from the professor's document that this requirement is drawn from.
+  quote        String
+  documentId   String
+  page         Int?
+  points       Float?
+  status       RequirementStatus @default(todo)
+  ordinal      Int
+  assignment   Assignment        @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  document     Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------- code workspace
+
+model Project {
+  id          String           @id @default(uuid())
+  workspaceId String
+  name        String
+  /// Directory on the server that holds the project's working files.
+  rootPath    String
+  template    String?
+  createdAt   DateTime         @default(now())
+  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  files       ProjectFile[]
+  versions    ProjectVersion[]
+  artifacts   Artifact[]
+}
+
+model ProjectFile {
+  id        String   @id @default(uuid())
+  projectId String
+  path      String
+  sha256    String
+  sizeBytes Int
+  updatedAt DateTime @updatedAt
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, path])
+}
+
+model ProjectVersion {
+  id        String   @id @default(uuid())
+  projectId String
+  /// Git commit holding this version's snapshot.
+  commit    String
+  label     String
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+}
+
+model Artifact {
+  id          String    @id @default(uuid())
+  workspaceId String
+  projectId   String?
+  taskId      String?
+  kind        String
+  title       String
+  content     String
+  createdAt   DateTime  @default(now())
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project     Project?  @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  task        Task?     @relation(fields: [taskId], references: [id], onDelete: SetNull)
+}
+
+// ---------------------------------------------------------------- computer mode
+
+enum ComputerSessionStatus {
+  active
+  paused
+  ended
+}
+
+model ComputerSession {
+  id          String                @id @default(uuid())
+  workspaceId String
+  deviceId    String?
+  taskId      String?
+  goal        String
+  status      ComputerSessionStatus @default(active)
+  createdAt   DateTime              @default(now())
+  endedAt     DateTime?
+  workspace   Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  device      Device?               @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  actions     BrowserAction[]
+  approvals   ApprovalRequest[]
+}
+
+enum ActionSensitivity {
+  read
+  interact
+  sensitive
+}
+
+enum ActionStatus {
+  pending
+  awaiting_approval
+  approved
+  rejected
+  dispatched
+  succeeded
+  failed
+}
+
+model BrowserAction {
+  id          String            @id @default(uuid())
+  sessionId   String
+  ordinal     Int
+  type        String
+  params      Json              @default("{}")
+  sensitivity ActionSensitivity
+  status      ActionStatus      @default(pending)
+  result      Json?
+  error       String?
+  createdAt   DateTime          @default(now())
+  executedAt  DateTime?
+  session     ComputerSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  approval    ApprovalRequest?
+
+  @@unique([sessionId, ordinal])
+}
+
+enum ApprovalStatus {
+  pending
+  approved
+  rejected
+  expired
+}
+
+model ApprovalRequest {
+  id        String           @id @default(uuid())
+  sessionId String?
+  actionId  String?          @unique
+  taskId    String?
+  kind      String
+  summary   String
+  status    ApprovalStatus   @default(pending)
+  createdAt DateTime         @default(now())
+  decidedAt DateTime?
+  session   ComputerSession? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  action    BrowserAction?   @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  task      Task?            @relation(fields: [taskId], references: [id], onDelete: Cascade)
+}

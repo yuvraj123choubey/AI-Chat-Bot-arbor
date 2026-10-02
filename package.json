@@ -3,22 +3,37 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
+    "dev": "concurrently -n db,api,web \"npm:dev:db\" \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:db": "tsx scripts/db.ts start",
     "dev:api": "tsx watch --include .env --include config/models.example.json apps/api/src/server.ts",
     "dev:web": "vite --config apps/web/vite.config.ts",
-    "start": "tsx apps/api/src/server.ts",
+    "start": "tsx scripts/db.ts migrate && tsx apps/api/src/server.ts",
+    "db:migrate": "tsx scripts/db.ts migrate",
+    "db:stop": "tsx scripts/db.ts stop",
+    "db:generate": "prisma generate",
+    "postinstall": "prisma generate",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "build": "tsc --noEmit && vite build --config apps/web/vite.config.ts",
-    "test": "node --experimental-transform-types --test --test-timeout=20000 \"packages/ai/test/*.test.ts\""
+    "test": "node --experimental-transform-types --test --test-timeout=60000 \"packages/*/test/*.test.ts\" \"apps/*/test/*.test.ts\"",
+    "check:search": "tsx scripts/check-search.ts"
   },
   "dependencies": {
+    "@mozilla/readability": "^0.6.0",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "embedded-postgres": "^18.4.0-beta.17",
+    "linkedom": "^0.18.13",
+    "pg": "^8.23.1",
+    "prisma": "^7.10.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "undici": "^8.11.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "@types/node": "^24.0.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.7.0",
@@ -30,5 +45,8 @@
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.71.0",
     "vite": "^6.3.0"
+  },
+  "allowScripts": {
+    "@prisma/engines@7.10.0": true
   }
 }

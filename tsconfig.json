@@ -11,5 +11,5 @@
     "allowImportingTsExtensions": true,
     "types": ["node"]
   },
-  "include": ["apps", "packages"]
+  "include": ["apps", "packages", "scripts", "prisma.config.ts"]
 }

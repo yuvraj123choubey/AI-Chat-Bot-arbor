@@ -21,6 +21,8 @@ export interface ChatInput {
   reasoningLevel: ReasoningMode;
   /** Task kind of the conversation's previous turn, so short follow-ups stay on the same kind of model. */
   previousTaskKind?: TaskKind;
+  /** Citation rules to add when the last user turn carries numbered sources. */
+  grounding?: string;
   context?: Record<string, string | undefined>;
 }
 export interface ChatDeps {
@@ -65,14 +67,15 @@ export function outputBudget(model: ModelDefinition, level: ReasoningMode): numb
   const budget = model.supportsReasoning ? Math.max(budgets[level], budgets.balanced) : budgets[level];
   return Math.min(budget, model.maxOutputTokens || budget);
 }
-export function systemPrompt(level: ReasoningMode): string {
+export function systemPrompt(level: ReasoningMode, grounding?: string): string {
   return [
     "You are Arbor, an AI assistant for research, reasoning, coding and writing.",
     "Answer the user's latest message, using the earlier conversation as context.",
     "Use Markdown when it helps: short headings, lists, and fenced code blocks with a language tag.",
     "Give the answer and the key steps that support it; do not narrate hidden reasoning.",
     "If you are unsure or lack information the question depends on, say so rather than guessing.",
-    levelGuidance[level]
+    levelGuidance[level],
+    ...(grounding ? [grounding] : [])
   ].join(" ");
 }
 /** Providers reject empty turns, and Claude and Gemini also reject consecutive turns from the same role, so those are merged. */
@@ -110,7 +113,7 @@ export function friendlyError(code: ChatErrorCode, model?: ModelDefinition): str
 export async function* streamChat(deps: ChatDeps, input: ChatInput, signal?: AbortSignal): AsyncGenerator<ChatEvent> {
   const plan = planChat(deps.models, input);
   if ("error" in plan) { yield { type: "error", code: plan.error, message: friendlyError(plan.error) }; return; }
-  const messages: Message[] = [{ role: "system", content: systemPrompt(input.reasoningLevel) }, ...normalizeHistory(input.history)];
+  const messages: Message[] = [{ role: "system", content: systemPrompt(input.reasoningLevel, input.grounding) }, ...normalizeHistory(input.history)];
   const fallbackFrom: string[] = [];
   for (const [index, model] of plan.candidates.entries()) {
     const idle = new AbortController();

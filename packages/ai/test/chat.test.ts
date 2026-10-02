@@ -1,8 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { normalizeHistory, outputBudget, streamChat, type ChatEvent, type ChatInput } from "../src/chat.ts";
 import { ProviderError, toProviderError } from "../src/providers/base.ts";
 import { DeepSeekProvider } from "../src/providers/deepseek.ts";
@@ -10,7 +7,6 @@ import { OpenAIProvider } from "../src/providers/openai.ts";
 import { AnthropicProvider } from "../src/providers/anthropic.ts";
 import { GoogleProvider } from "../src/providers/google.ts";
 import { redactSecrets } from "../src/redact.ts";
-import { FileConversationStore } from "../../../apps/api/src/conversations.ts";
 import type { AIProvider, GenerateRequest, ModelDefinition, StreamChunk } from "../src/types.ts";
 
 const model = (id: string, provider: string, extra: Partial<ModelDefinition> = {}): ModelDefinition => ({ id, provider, modelId: `${id}-v1`, displayName: id, capabilities: [], supportsStreaming: true, supportsTools: false, supportsVision: false, supportsReasoning: false, supportsCoding: false, contextWindow: 0, inputUsdPerMillion: 0, outputUsdPerMillion: 0, enabled: true, ...extra });
@@ -186,19 +182,4 @@ test("Gemini hides thought parts and reports blocked responses", async () => {
   await withFetch(sse(['data: {"candidates":[{"content":{"parts":[{"text":"private","thought":true},{"text":"Visible"}]},"finishReason":"SAFETY"}]}']), async () => {
     assert.deepEqual(await chunks(new GoogleProvider("key").stream({ model: general, messages: [{ role: "user", content: "q" }] })), [{ thinking: true }, { text: "Visible" }, { stop: "filtered" }]);
   });
-});
-
-test("conversation store round-trips, sorts by recency, and rejects unsafe ids", async () => {
-  const folder = await mkdtemp(join(tmpdir(), "arbor-store-"));
-  try {
-    const store = new FileConversationStore(folder);
-    const base = { workspaceId: "default", createdAt: "2026-01-01T00:00:00Z", messages: [] };
-    await store.save({ ...base, id: "00000000-0000-4000-8000-000000000001", title: "Older", updatedAt: "2026-01-01T00:00:00Z" });
-    await store.save({ ...base, id: "00000000-0000-4000-8000-000000000002", title: "Newer", updatedAt: "2026-01-02T00:00:00Z" });
-    assert.deepEqual((await store.list("default")).map(c => c.title), ["Newer", "Older"]);
-    assert.deepEqual(await store.list("other"), []);
-    assert.equal(await store.get("../../etc/passwd"), undefined);
-    assert.equal(await store.delete("00000000-0000-4000-8000-000000000001"), true);
-    assert.deepEqual(await readdir(folder), ["00000000-0000-4000-8000-000000000002.json"]);
-  } finally { await rm(folder, { recursive: true, force: true }); }
 });
