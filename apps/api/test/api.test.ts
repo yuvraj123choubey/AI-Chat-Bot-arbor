@@ -238,7 +238,8 @@ test("deep research runs as a task: live events, stored plan, numbered sources, 
   assert.equal(research.plan.subquestions[0].question, "Which backups work against ransomware?");
   assert.deepEqual(research.queries, ["ransomware backups"]);
   assert.equal(research.report.trim(), "## Summary\nOffline backups allow recovery [1]. Made-up claim.");
-  assert.deepEqual(research.sources.map((s: any) => [s.ordinal, s.cited]).slice(0, 2), [[1, true], [2, false]]);
+  // The patching source does not address "which backups work", so the relevance cutoff leaves only the backups source.
+  assert.deepEqual(research.sources.map((s: any) => [s.ordinal, s.cited]), [[1, true]]);
   assert.equal(research.notes[0].content, "Offline backups allow recovery without paying.");
   assert.deepEqual(research.steps.map((s: any) => [s.kind, s.status]), [["plan", "completed"], ["search", "completed"], ["notes", "completed"], ["gaps", "completed"], ["report", "completed"]]);
   assert.ok(await app.db.agentRun.count({ where: { taskId } }) >= 3);

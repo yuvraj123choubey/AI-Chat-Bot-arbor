@@ -10,8 +10,10 @@ export function tokenize(text: string): string[] {
 /** Light suffix stripping so "attacks", "attacked" and "attacking" match "attack". */
 function stem(t: string): string {
   if (t.length > 5 && t.endsWith("ies")) return `${t.slice(0, -3)}y`;
-  for (const suffix of ["ing", "edly", "ed", "es", "ly", "s"]) if (t.length > suffix.length + 3 && t.endsWith(suffix)) return t.slice(0, -suffix.length);
-  return t;
+  let s = t;
+  for (const suffix of ["ing", "edly", "ed", "es", "ly", "s"]) if (s.length > suffix.length + 3 && s.endsWith(suffix)) { s = s.slice(0, -suffix.length); break; }
+  // A final "e" is dropped too, so "defense"/"defenses" and "course"/"courses" share a stem.
+  return s.length > 4 && s.endsWith("e") ? s.slice(0, -1) : s;
 }
 
 /** Splits text into passages of about `target` characters, breaking at paragraphs, then sentences, then hard limits. */
@@ -74,6 +76,7 @@ export function queryTerms(question: string, queries: string[]): Map<string, num
 const typePrior: Partial<Record<SourceType, number>> = { official: 1.6, academic: 1.12, government: 1.1, documentation: 1.08, encyclopedia: 1.03, news: 1.02, forum: 0.92 };
 const lowAuthority = /(^|\.)(coursehero\.com|chegg\.com|studocu\.com|quizlet\.com|scribd\.com|brainly\.com|numerade\.com|bartleby\.com|studypool\.com)$/;
 export interface EvidenceLimits { maxSources: number; perSource: number; maxPassages: number }
+const COVERAGE_CUTOFF = 0.5;
 
 /**
  * Chooses which sources and passages the model may see. Each source keeps its best passages; sources are
@@ -105,11 +108,21 @@ export function selectEvidence(sources: RetrievedSource[], question: string, que
       domains.set(sources[entry.i].domain, seen + 1);
       return { ...entry, score: entry.score * Math.pow(0.8, seen) };
     })
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limits.maxSources);
+    .sort((a, b) => b.score - a.score);
+  // Sources that cover far fewer of the question's own terms than the best source only pad the answer
+  // (a catalog entry matching "cpre 4300 iowa state" does not need a paper that merely mentions Iowa).
+  const asked = [...terms].filter(([, weight]) => weight === 1).map(([t]) => t);
+  const coverage = (i: number, passages: Passage[]) => {
+    if (!asked.length) return 1;
+    const present = new Set(tokenize(`${sources[i].title}\n${passages.map(p => p.text).join("\n")}`));
+    return asked.filter(t => present.has(t)).length / asked.length;
+  };
+  const covered = ranked.map(entry => ({ ...entry, coverage: coverage(entry.i, entry.passages) }));
+  const bestCoverage = Math.max(0, ...covered.map(c => c.coverage));
+  const relevant = covered.filter(entry => entry.coverage >= bestCoverage * COVERAGE_CUTOFF).slice(0, limits.maxSources);
   let budget = limits.maxPassages;
   const chosen: EvidenceSource[] = [];
-  for (const entry of ranked) {
+  for (const entry of relevant) {
     if (budget <= 0) break;
     const passages = entry.passages.slice(0, budget).sort((a, b) => a.start - b.start);
     budget -= passages.length;

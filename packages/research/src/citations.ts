@@ -55,8 +55,8 @@ export function sanitizeLinks(text: string, allowedUrls: Iterable<string>): { te
       removed.push(url);
       return "";
     })
-    .replace(/\(\s*\)/g, "").replace(/[ \t]{2,}/g, " ").replace(/ +([.,;:])/g, "$1").replace(/[ \t]+$/gm, ""));
-  return { text: cleaned, removed };
+    .replace(/\(\s*\)/g, "").replace(/[ \t]{2,}/g, " ").replace(/ +([.,;:])/g, "$1").replace(/[ \t]+(?=\n)/g, ""));
+  return { text: cleaned.replace(/[ \t]+$/, ""), removed };
 }
 function normaliseLink(url: string): string {
   let value = url.trim();

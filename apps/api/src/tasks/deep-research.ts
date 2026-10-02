@@ -22,7 +22,8 @@ export function researchModels(models: ModelDefinition[], selectedModel: string)
   const qualified = writers.filter(m => !unmetRequirements(m, writerRequest).length);
   return {
     structured: rankModels(models, { prompt: "", mode: "fast", taskKind: "chat", modelChoice: "auto" }, allowed, "verifier"),
-    writer: qualified.length ? qualified : writers
+    // Reasoning models write first; the others follow as fallbacks, so one failed call does not lose the report.
+    writer: [...qualified, ...writers.filter(m => !qualified.includes(m))]
   };
 }
 

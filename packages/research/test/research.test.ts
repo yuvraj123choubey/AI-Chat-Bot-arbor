@@ -199,3 +199,10 @@ test("answers that claim something doesn't exist are flagged for a search", asyn
   for (const claim of ["CPRE 4300 is not a recognized course code at Iowa State University.", "I couldn't find any information about that course.", "You may mean CSE 4300 instead; likely alternatives include CPE 4300.", "That law doesn't exist."]) assert.equal(claimsUnverifiable(claim), true, claim);
   for (const fine of ["Apples are a sweet fruit grown on trees.", "Here is a plan for your week."]) assert.equal(claimsUnverifiable(fine), false, fine);
 });
+
+test("loosely related sources are dropped when a much better match exists", () => {
+  const official = retrieved("Catalog", "CPRE 4300: Network Protocols and Security at Iowa State University. Course description: networking standards and protocols.", { sourceType: "official" });
+  const padding = retrieved("Geothermal", "Geothermal heat flux measurements in the state of Iowa.");
+  const evidence = selectEvidence([padding, official], "course description cpre 4300 iowa state", [], { maxSources: 6, perSource: 2, maxPassages: 12 });
+  assert.deepEqual(evidence.map(e => e.source.title), ["Catalog"]);
+});
