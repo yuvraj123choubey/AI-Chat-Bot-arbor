@@ -2,13 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { api, formatDate, typeLabel, type MessageSource, type SourceInfo } from "../api.ts";
 
 const initial = (s: SourceInfo) => (s.publisher || s.domain || "?").replace(/^www\./, "").charAt(0).toUpperCase();
+/** For papers, the journal says more than the DOI resolver's domain. */
+const siteLabel = (s: SourceInfo) => (s.domain === "doi.org" && s.publisher ? s.publisher : s.domain);
 
 /** Compact row of the numbered sources under a searched answer. */
 export function SourceStrip({ sources, onOpen }: { sources: MessageSource[]; onOpen(ordinal: number): void }) {
   const shown = sources.slice(0, 4);
   return <div className="source-strip">
     {shown.map(s => <button type="button" key={s.ordinal} className="source-chip" onClick={() => onOpen(s.ordinal)} title={s.source.title}>
-      <span className="source-chip-top"><span className="source-mark">{initial(s.source)}</span><span className="source-domain">{s.source.domain}</span><span className="source-num">{s.ordinal}</span></span>
+      <span className="source-chip-top"><span className="source-mark">{initial(s.source)}</span><span className="source-domain">{siteLabel(s.source)}</span><span className="source-num">{s.ordinal}</span></span>
       <span className="source-chip-title">{s.source.title}</span>
     </button>)}
     {sources.length > shown.length && <button type="button" className="source-chip more" onClick={() => onOpen(sources[shown.length].ordinal)}>+{sources.length - shown.length} more</button>}

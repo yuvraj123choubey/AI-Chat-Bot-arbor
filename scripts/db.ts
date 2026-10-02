@@ -47,12 +47,55 @@ function migrate(url: string) {
   const result = spawnSync("npx prisma migrate deploy", { stdio: "inherit", shell: true, env: { ...process.env, DATABASE_URL: url, PRISMA_HIDE_UPDATE_MESSAGE: "1" } });
   if (result.status !== 0) throw new Error("prisma migrate deploy failed");
 }
+/** Arbor stores text from anywhere on the web, so its database is always UTF-8 whatever the OS locale is. */
+const createUtf8 = (name: string) => `CREATE DATABASE "${name}" ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0`;
+
 async function ensureDatabase(config: LocalDbConfig) {
   const admin = new pg.Client({ connectionString: localDatabaseUrl(config, "postgres") });
   await admin.connect();
-  const exists = await admin.query("SELECT 1 FROM pg_database WHERE datname = $1", [config.database]);
-  if (!exists.rowCount) await admin.query(`CREATE DATABASE "${config.database}"`);
-  await admin.end();
+  try {
+    const found = await admin.query("SELECT pg_encoding_to_char(encoding) AS encoding FROM pg_database WHERE datname = $1", [config.database]);
+    if (!found.rowCount) await admin.query(createUtf8(config.database));
+    else if (found.rows[0].encoding !== "UTF8") await convertToUtf8(admin, config, found.rows[0].encoding);
+  } finally { await admin.end(); }
+}
+
+/**
+ * Earlier local databases were created in the OS encoding (WIN1252 on Windows), which cannot hold arbitrary
+ * Unicode. The data is copied into a new UTF-8 database inside the same server; the old database is kept,
+ * renamed, as a backup.
+ */
+async function convertToUtf8(admin: pg.Client, config: LocalDbConfig, encoding: string) {
+  const target = `${config.database}_utf8_tmp`;
+  const backup = `${config.database}_backup_${encoding.toLowerCase()}_${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+  console.log(`Converting the local database from ${encoding} to UTF-8 (the original is kept as "${backup}")…`);
+  await admin.query(`DROP DATABASE IF EXISTS "${target}"`);
+  await admin.query(createUtf8(target));
+  migrate(localDatabaseUrl(config, target));
+  const source = new pg.Client({ connectionString: localDatabaseUrl(config) });
+  const dest = new pg.Client({ connectionString: localDatabaseUrl(config, target) });
+  await source.connect();
+  await dest.connect();
+  try {
+    const tables = (await source.query("SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename <> '_prisma_migrations'")).rows.map(r => r.tablename as string);
+    await dest.query("BEGIN");
+    // Rows are copied in any order, so foreign-key triggers are suspended for this session only.
+    await dest.query("SET session_replication_role = replica");
+    for (const table of tables) {
+      const rows = (await source.query(`SELECT row_to_json(t) AS r FROM "${table}" t`)).rows.map(r => r.r);
+      for (let i = 0; i < rows.length; i += 500) {
+        await dest.query(`INSERT INTO "${table}" SELECT * FROM json_populate_recordset(NULL::"${table}", $1::json)`, [JSON.stringify(rows.slice(i, i + 500))]);
+      }
+      if (rows.length) console.log(`  copied ${rows.length} row(s) from ${table}`);
+    }
+    await dest.query("COMMIT");
+  } catch (error) {
+    await dest.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally { await source.end(); await dest.end(); }
+  await admin.query(`ALTER DATABASE "${config.database}" RENAME TO "${backup}"`);
+  await admin.query(`ALTER DATABASE "${target}" RENAME TO "${config.database}"`);
+  console.log("Local database converted to UTF-8.");
 }
 
 async function startLocal(): Promise<string> {
@@ -60,7 +103,7 @@ async function startLocal(): Promise<string> {
   const adminUrl = localDatabaseUrl(config, "postgres");
   if (!existsSync(join(pgdata, "PG_VERSION"))) {
     console.log("Creating the local database (first run)…");
-    await new EmbeddedPostgres({ databaseDir: pgdata, user: config.user, password: config.password, port: config.port, persistent: true, onLog: () => {}, onError: () => {} }).initialise();
+    await new EmbeddedPostgres({ databaseDir: pgdata, user: config.user, password: config.password, port: config.port, persistent: true, initdbFlags: ["--encoding=UTF8", "--locale=C"], onLog: () => {}, onError: () => {} }).initialise();
   }
   if (await responsive(adminUrl)) {
     console.log(`Local database already running on port ${config.port}.`);
@@ -84,7 +127,8 @@ if (command === "stop") {
   process.exit(pgCtl(["stop", "-m", "fast"]).status ?? 1);
 }
 try {
-  const external = process.env.DATABASE_URL;
+  // An empty DATABASE_URL= line in .env means "not set".
+  const external = process.env.DATABASE_URL || undefined;
   const url = external ?? await startLocal();
   if (external) console.log(`Using DATABASE_URL ${describeUrl(external)}`);
   migrate(url);

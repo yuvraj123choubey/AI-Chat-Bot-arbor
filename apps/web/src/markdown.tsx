@@ -62,14 +62,19 @@ function blocks(text: string): React.ReactNode[] {
     const listItem = /^\s*([-*+]|\d+[.)])\s+/;
     if (listItem.test(line)) {
       const ordered = /^\s*\d/.test(line);
+      const sameKind = (l: string) => listItem.test(l) && /^\s*\d/.test(l) === ordered;
       const items: string[] = [];
-      while (i < lines.length && (listItem.test(lines[i]) || (/^\s{2,}\S/.test(lines[i]) && items.length))) {
-        if (listItem.test(lines[i])) items.push(lines[i].replace(listItem, ""));
-        else items[items.length - 1] += `\n${lines[i].trim()}`;
+      while (i < lines.length) {
+        if (sameKind(lines[i])) items.push(lines[i].replace(listItem, ""));
+        else if (/^\s{2,}\S/.test(lines[i]) && items.length) items[items.length - 1] += `\n${lines[i].trim()}`;
+        // Models often put blank lines between items; the list continues if the next item follows.
+        else if (!lines[i].trim() && sameKind(lines.slice(i + 1).find(l => l.trim()) ?? "")) { /* skip the blank line */ }
+        else break;
         i++;
       }
+      const start = ordered ? Number(line.match(/\d+/)![0]) : 1;
       const List = ordered ? "ol" : "ul";
-      out.push(<List key={out.length}>{items.map((item, k) => <li key={k}>{withBreaks(item)}</li>)}</List>);
+      out.push(<List key={out.length} start={ordered && start !== 1 ? start : undefined}>{items.map((item, k) => <li key={k}>{withBreaks(item)}</li>)}</List>);
       continue;
     }
     const paragraph: string[] = [];

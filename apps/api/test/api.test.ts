@@ -44,7 +44,8 @@ const search: SearchProvider = {
   id: "stub-search", label: "Stub search", coverage: "encyclopedia", isConfigured: () => true,
   async search(query) {
     return [
-      { url: "https://example.org/backups", title: "Ransomware backups", snippet: "Backups", provider: "stub-search", query, rank: 0, fullText: "Offline backups are the most effective defense against ransomware encryption. ".repeat(30) },
+      // Real pages contain arbitrary Unicode (hair spaces, CJK, emoji); storing it is a regression test for database encoding.
+      { url: "https://example.org/backups", title: "Ransomware backups — 勒索软件 🔒", snippet: "Backups …", provider: "stub-search", query, rank: 0, fullText: "Offline backups are the most effective defense against ransomware encryption. 数据 🔒 ".repeat(30) },
       { url: "https://example.org/patching", title: "Ransomware patching", snippet: "Patching", provider: "stub-search", query, rank: 1, fullText: "Patching vulnerabilities is a ransomware defense that prevents initial access. ".repeat(30) }
     ];
   }

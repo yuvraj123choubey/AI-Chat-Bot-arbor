@@ -27,7 +27,7 @@ export async function startTestDb(timeoutMs = 120_000): Promise<TestDb> {
 async function launch(): Promise<TestDb> {
   const root = await mkdtemp(join(tmpdir(), "arbor-db-"));
   const port = await freePort();
-  const pg = new EmbeddedPostgres({ databaseDir: join(root, "pgdata"), user: "arbor_test", password: "arbor_test", port, persistent: false, onLog: () => {}, onError: () => {} });
+  const pg = new EmbeddedPostgres({ databaseDir: join(root, "pgdata"), user: "arbor_test", password: "arbor_test", port, persistent: false, initdbFlags: ["--encoding=UTF8", "--locale=C"], onLog: () => {}, onError: () => {} });
   await pg.initialise();
   await pg.start();
   await pg.createDatabase("arbor_test");
