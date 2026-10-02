@@ -104,10 +104,22 @@ function inline(text: string, prefix = "i"): React.ReactNode[] {
   if (last < text.length) out.push(text.slice(last));
   return out;
 }
+/** A diff is shown with added and removed lines coloured; it is detected by language or by +/- line prefixes. */
+function isDiff(language: string, code: string): boolean {
+  if (/^(diff|patch)$/i.test(language)) return true;
+  const lines = code.split("\n").filter(l => l.trim());
+  return lines.length > 1 && /^(@@|--- |\+\+\+ )/m.test(code) && lines.every(l => /^[+\- @\\]/.test(l));
+}
 function CodeBlock({ language, code }: { language: string; code: string }) {
   const [copied, setCopied] = useState(false);
+  const diff = isDiff(language, code);
   return <div className="md-code">
-    <div className="md-code-bar"><span>{language || "code"}</span><button type="button" onClick={() => navigator.clipboard.writeText(code).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {})}>{copied ? "Copied" : "Copy"}</button></div>
-    <pre><code>{code}</code></pre>
+    <div className="md-code-bar">
+      <span className="md-code-lang"><span className="md-code-dot" aria-hidden="true" />{diff && language !== "diff" ? `${language || "code"} · diff` : language || "code"}</span>
+      <button type="button" onClick={() => navigator.clipboard.writeText(code).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {})}>{copied ? "Copied" : "Copy"}</button>
+    </div>
+    <pre><code>{diff
+      ? code.split("\n").map((line, i) => <span key={i} className={`diff-line${line.startsWith("+") && !line.startsWith("+++") ? " add" : line.startsWith("-") && !line.startsWith("---") ? " del" : line.startsWith("@@") ? " hunk" : ""}`}>{line}{"\n"}</span>)
+      : code}</code></pre>
   </div>;
 }

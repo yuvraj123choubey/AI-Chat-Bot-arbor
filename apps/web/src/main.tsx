@@ -2,22 +2,22 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, ndjsonEvents, WORKSPACE, type ChatMessage, type Level, type Model, type SearchMode, type Summary } from "./api.ts";
 import { AnswerCard } from "./components/Answer.tsx";
-import { SourceLibrary, SourcesPanel } from "./components/Sources.tsx";
+import { Background } from "./components/Background.tsx";
+import { Composer } from "./components/Composer.tsx";
 import { DeepResearch } from "./components/DeepResearch.tsx";
+import { BookIcon, ChatIcon, CodeIcon, CompassIcon, GridIcon, LogoIcon, MenuIcon, PlusIcon, SearchIcon, SparkIcon } from "./components/Icons.tsx";
+import { SourceLibrary, SourcesPanel } from "./components/Sources.tsx";
 import "./style.css";
 
 type View = "chat" | "research" | "sources";
-const starters = [
-  { icon: "⌕", title: "Research a topic", prompt: "Research recent approaches to ransomware defense and cite credible sources." },
-  { icon: "⌘", title: "Solve a hard problem", prompt: "Explain a rigorous approach to proving a mathematical result." },
-  { icon: "</>", title: "Work through code", prompt: "Help debug a React application. Ask for the relevant files first." },
-  { icon: "▤", title: "Plan an assignment", prompt: "Help me break down an assignment into research, implementation, testing, and rubric review." }
-];
+const VERSION = "v0.3";
 const stored = (key: string, fallback: string) => { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } };
 const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* preferences are optional */ } };
+const searchWord: Record<SearchMode, string> = { auto: "auto", on: "always", off: "off" };
 
 function App() {
   const [view, setView] = useState<View>("chat");
+  const [drawer, setDrawer] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [prompt, setPrompt] = useState("");
@@ -32,6 +32,7 @@ function App() {
   const [streaming, setStreaming] = useState(false);
   const [panel, setPanel] = useState<{ messageId: string; ordinal?: number } | null>(null);
   const [researchPanel, setResearchPanel] = useState(false);
+  const [lastReplyMs, setLastReplyMs] = useState<number | undefined>();
   const controller = useRef<AbortController | null>(null);
   const pending = useRef("");
   const frame = useRef(0);
@@ -45,18 +46,24 @@ function App() {
       setModelsLoaded(true);
       // A remembered model may no longer be configured on the server.
       setChoice(current => current === "auto" || list.some(m => m.id === current) ? current : "auto");
-    }).catch(() => setError("Can't reach the Arbor server. Start it with npm run dev."));
+    }).catch(() => { setModelsLoaded(true); setError("Can't reach the Arbor server. Start it with npm run dev."); });
     loadHistory();
   }, [loadHistory]);
   useEffect(() => remember("arbor.level", mode), [mode]);
   useEffect(() => remember("arbor.model", choice), [choice]);
   useEffect(() => remember("arbor.search", searchMode), [searchMode]);
   useEffect(() => {
-    const onScroll = () => { followBottom.current = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160; };
+    const onScroll = () => { followBottom.current = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 220; };
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
   useEffect(() => { if (followBottom.current) endRef.current?.scrollIntoView({ block: "end" }); }, [messages]);
+  useEffect(() => {
+    if (!drawer) return;
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") setDrawer(false); };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [drawer]);
 
   const updateLast = (change: (m: ChatMessage) => ChatMessage) => setMessages(prior => prior.map((m, i) => i === prior.length - 1 ? change(m) : m));
   /** Deltas are batched per animation frame so long answers don't re-render on every token. */
@@ -73,6 +80,8 @@ function App() {
     setError("");
     setPanel(null);
     followBottom.current = true;
+    const started = performance.now();
+    let sawText = false;
     const placeholder: ChatMessage = { id: `pending-${Date.now()}`, role: "assistant", content: "", status: "streaming" };
     if (options.regenerate) {
       setMessages(prior => { const kept = [...prior]; while (kept.at(-1)?.role === "assistant") kept.pop(); return [...kept, placeholder]; });
@@ -103,15 +112,20 @@ function App() {
           case "thinking": updateLast(m => ({ ...m, thinking: true })); break;
           // The server discarded an unverified draft and is searching first; the searched answer replaces it.
           case "reset": cancelAnimationFrame(frame.current); frame.current = 0; pending.current = ""; updateLast(m => ({ ...m, content: "", thinking: false })); break;
-          case "delta": pending.current += event.text; frame.current ||= requestAnimationFrame(flush); break;
-          case "done": case "stopped": case "error":
+          case "delta":
+            if (!sawText) { sawText = true; const ms = performance.now() - started; updateLast(m => ({ ...m, firstTextMs: ms })); }
+            pending.current += event.text; frame.current ||= requestAnimationFrame(flush); break;
+          case "done": case "stopped": case "error": {
             cancelAnimationFrame(frame.current); flush();
+            const elapsedMs = performance.now() - started;
+            if (event.type === "done") setLastReplyMs(elapsedMs);
             updateLast(m => ({
-              ...m, thinking: false, status: event.type === "done" ? "complete" : event.type, stop: event.stop, error: event.message,
+              ...m, thinking: false, status: event.type === "done" ? "complete" : event.type, stop: event.stop, error: event.message, elapsedMs,
               // The backend removes citations to sources it did not supply; adopt its cleaned text.
               ...(typeof event.content === "string" ? { content: event.content } : {}),
               ...(event.cited && m.sources ? { sources: m.sources.map(s => ({ ...s, cited: event.cited.includes(s.ordinal) })) } : {})
             }));
+          }
         }
       }
     } catch {
@@ -127,14 +141,15 @@ function App() {
     }
   }
   function stop() { controller.current?.abort(); }
+  function go(next: View) { setView(next); setPanel(null); setDrawer(false); }
   function newConversation() {
     if (streaming) return;
-    setView("chat"); setPanel(null);
+    go("chat");
     setConversationId(null); setTitle(""); setMessages([]); setPrompt(""); setError("");
   }
   async function open(id: string) {
     if (streaming) return;
-    setView("chat"); setPanel(null);
+    go("chat");
     if (id === conversationId) return;
     try {
       const conversation = await api.conversation(id);
@@ -144,59 +159,88 @@ function App() {
   }
   const openSources = useCallback((messageId: string, ordinal?: number) => setPanel({ messageId, ordinal }), []);
   const lastAssistant = messages.findLastIndex(m => m.role === "assistant");
-  const groups = [...new Set(models.map(m => m.providerLabel))];
   const panelMessage = panel ? messages.find(m => m.id === panel.messageId) : undefined;
+  const panelOpen = (view === "chat" && Boolean(panelMessage?.sources?.length)) || (view === "research" && researchPanel);
+  const providerNames = [...new Set(models.map(m => m.providerLabel))];
+  const status = !modelsLoaded ? "Connecting…" : models.length ? `${providerNames.join(" + ")} · ${models.length} model${models.length === 1 ? "" : "s"} ready` : "No model connected";
+  const starters = [
+    { icon: <SearchIcon size={16} />, badge: "Cited", title: "Research a topic", note: "Plans, searches and writes a cited report", run: () => go("research") },
+    { icon: <CodeIcon size={16} />, badge: "Code", title: "Work through code", note: "Debug, explain or review code", run: () => setPrompt("Help me debug this code. Here's what it should do and what happens instead:\n\n") },
+    { icon: <SparkIcon size={16} />, badge: "Deep", title: "Solve hard logic", note: "Step-by-step reasoning", run: () => { setMode("deep"); setPrompt("Work through this problem step by step: "); } },
+    { icon: <GridIcon size={16} />, badge: "Plan", title: "Plan an assignment", note: "Break work into steps", run: () => setPrompt("Help me break this assignment into research, writing, testing and a final check against the rubric: ") }
+  ];
 
-  return <div className={`shell${(view === "chat" && panelMessage?.sources?.length) || (view === "research" && researchPanel) ? " with-panel" : ""}`}>
-    <aside className="sidebar">
-      <div className="brand"><span className="brandmark">✳</span><span>arbor<span className="branddot">.</span></span></div>
-      <button className="new-task" onClick={newConversation} disabled={streaming}>＋ <span>New conversation</span></button>
-      <div className="nav-label">WORKSPACE</div>
-      <button type="button" className={`nav-item${view === "chat" ? " active" : ""}`} onClick={() => setView("chat")}>◈ <span>Ask Arbor</span></button>
-      <button type="button" className={`nav-item${view === "research" ? " active" : ""}`} onClick={() => { setView("research"); setPanel(null); }} disabled={streaming}>◎ <span>Deep research</span></button>
-      <button type="button" className={`nav-item${view === "sources" ? " active" : ""}`} onClick={() => { setView("sources"); setPanel(null); }} disabled={streaming}>⌕ <span>Sources</span></button>
-      <div className="nav-item muted">▦ <span>Assignments <small>soon</small></span></div>
-      <div className="nav-item muted">⌘ <span>Code workspace <small>soon</small></span></div>
-      <div className="nav-item muted">◉ <span>Browser agent <small>soon</small></span></div>
-      {history.length > 0 && <>
-        <div className="nav-label">RECENT</div>
-        <nav className="history">{history.slice(0, 30).map(c => <button key={c.id} className={`history-item${c.id === conversationId && view === "chat" ? " current" : ""}`} onClick={() => open(c.id)} disabled={streaming} title={c.title}>{c.title}</button>)}</nav>
-      </>}
-      <div className="sidebar-bottom"><div className="status-dot" /> Local workspace <span className="version">v0.2</span></div>
-    </aside>
-    <main className="main">
-      <header><span className="header-title">{view === "sources" ? "Sources" : view === "research" ? "Deep research" : title || "AI workspace"}</span><div className="header-right"><span className="model-count">{models.length} active models</span><span className="avatar">A</span></div></header>
-      {view === "sources" ? <div className="content"><SourceLibrary /></div> : view === "research" ? <div className="content"><DeepResearch models={models} onPanelChange={setResearchPanel} /></div> : <div className="content">
-        {!messages.length && <><div className="eyebrow">RESEARCH · REASON · BUILD</div><h1>One workspace for<br/><em>everything you’re working on.</em></h1><p className="lede">Ask a question, untangle a tough problem, or start a project. Arbor picks the right model for the work.</p>
-          <div className="cards">{starters.map(s => <button key={s.title} className="card" onClick={() => setPrompt(s.prompt)}><span className="card-icon">{s.icon}</span><strong>{s.title}</strong><span className="arrow">↗</span></button>)}</div></>}
-        {messages.length > 0 && <div className="thread" aria-live="polite">
-          {messages.map((m, i) => m.role === "user"
-            ? <div key={m.id} className="msg-user">{m.content}</div>
-            : <AnswerCard key={m.id} message={m} isLast={i === lastAssistant} canRegenerate={Boolean(conversationId) && models.length > 0} streaming={streaming}
-                onRegenerate={() => send({ regenerate: true })} onOpenSources={ordinal => openSources(m.id, ordinal)} />)}
-          <div ref={endRef} />
-        </div>}
-        {error && <div className="error" role="alert">{error}</div>}
-        {modelsLoaded && !models.length && <div className="setup-note">No models are configured yet. Add a provider API key and model ID to <code>.env</code> on the server; the API picks it up automatically.</div>}
-        <div className={messages.length ? "composer-dock" : undefined}>
-          <div className="composer"><textarea value={prompt} onChange={e => setPrompt(e.target.value)} aria-label="Message"
-            onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(); } }}
-            placeholder={messages.length ? "Ask a follow-up…" : "Ask anything, or describe what you want to build..."} />
-            <div className="composer-footer"><div className="selectors">
-              <label>Model <select value={choice} onChange={e => setChoice(e.target.value)}><option value="auto">Auto</option>
-                {groups.map(g => <optgroup key={g} label={g}>{models.filter(m => m.providerLabel === g).map(m => <option key={m.id} value={m.id}>{m.displayName} ({m.modelId})</option>)}</optgroup>)}
-              </select></label>
-              <label>Reasoning <select value={mode} onChange={e => setMode(e.target.value as Level)}><option value="fast">Fast</option><option value="balanced">Balanced</option><option value="deep">Deep</option></select></label>
-              <label>Search <select value={searchMode} onChange={e => setSearchMode(e.target.value as SearchMode)}><option value="auto">Auto</option><option value="on">Always</option><option value="off">Off</option></select></label>
-            </div>
-            {streaming
-              ? <button className="send stop" onClick={stop}>■ Stop</button>
-              : <button className="send" disabled={!prompt.trim() || !models.length} onClick={() => send()}>Send ↗</button>}
-            </div></div>
-          <div className="hint">Enter to send · Shift + Enter for a new line · Provider routing happens on the server</div>
-        </div>
-      </div>}
-    </main>
+  return <div className={`app${panelOpen ? " with-panel" : ""}${view === "chat" ? " has-dock" : ""}`}>
+    <Background />
+    <header className="topbar">
+      <button type="button" className="icon-button menu-toggle" onClick={() => setDrawer(d => !d)} aria-label="Menu" aria-expanded={drawer}><MenuIcon size={17} /></button>
+      <button type="button" className="brand" onClick={newConversation} aria-label="Arbor home">
+        <span className="logo"><LogoIcon size={16} /><span className="logo-dot" /></span>
+        <span className="brand-text">
+          <span className="brand-line"><span className="brand-name">Arbor<span>.OS</span></span><span className="tag">{VERSION}</span></span>
+          <span className={`status-line${models.length ? "" : " warn"}`}><span className="dot" />{status}</span>
+        </span>
+      </button>
+      <div className="topbar-right">
+        <button type="button" className="pill-button" onClick={newConversation} disabled={streaming}><PlusIcon size={13} /> New</button>
+        <span className="avatar" aria-hidden="true">A<span className="avatar-dot" /></span>
+      </div>
+    </header>
+
+    <div className="layout">
+      <aside className={`sidebar${drawer ? " open" : ""}`} aria-label="Navigation">
+        <div className="nav-label">Workspace</div>
+        <button type="button" className={`nav-item${view === "chat" ? " active" : ""}`} onClick={() => go("chat")}><ChatIcon size={15} /> Ask Arbor</button>
+        <button type="button" className={`nav-item${view === "research" ? " active" : ""}`} onClick={() => go("research")} disabled={streaming}><CompassIcon size={15} /> Deep research</button>
+        <button type="button" className={`nav-item${view === "sources" ? " active" : ""}`} onClick={() => go("sources")} disabled={streaming}><BookIcon size={15} /> Sources</button>
+        <div className="nav-item muted"><GridIcon size={15} /> Assignments <small>soon</small></div>
+        <div className="nav-item muted"><CodeIcon size={15} /> Code workspace <small>soon</small></div>
+        {history.length > 0 && <>
+          <div className="nav-label">Recent</div>
+          <nav className="history">{history.slice(0, 30).map(c => <button key={c.id} className={`history-item${c.id === conversationId && view === "chat" ? " current" : ""}`} onClick={() => open(c.id)} disabled={streaming} title={c.title}>{c.title}</button>)}</nav>
+        </>}
+        <div className="sidebar-foot"><span className="dot" /> Local workspace · data stays on this machine</div>
+      </aside>
+      {drawer && <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />}
+
+      <main className="main">
+        {view === "sources" ? <SourceLibrary /> : view === "research" ? <DeepResearch models={models} onPanelChange={setResearchPanel} /> : <>
+          {!messages.length && <>
+            <section className="hero">
+              <div className="hero-meta">
+                <span className="eyebrow-pill"><span className="dot" />Workspace // Ask Arbor</span>
+                <span className="mono-note">Search · {searchWord[searchMode]}{lastReplyMs !== undefined && ` · last reply ${(lastReplyMs / 1000).toFixed(1)}s`}</span>
+              </div>
+              <h1>Orchestrate intelligence.<br /><span className="gradient-text">Research, reason and build in one place.</span></h1>
+              <p className="lede">Ask anything. When a question depends on facts, Arbor searches real sources first and cites them, and it runs on a free model on your own machine.</p>
+            </section>
+            <section className="carousel" aria-label="Ways to start">
+              {starters.map(s => <button key={s.title} type="button" className="mode-card glass" onClick={s.run}>
+                <span className="mode-top"><span className="mode-icon">{s.icon}</span><span className="tag">{s.badge}</span></span>
+                <strong>{s.title}</strong><small>{s.note}</small>
+              </button>)}
+            </section>
+          </>}
+          {messages.length > 0 && <div className="thread" aria-live="polite">
+            {title && <div className="thread-title">{title}</div>}
+            {messages.map((m, i) => m.role === "user"
+              ? <div key={m.id} className="msg-user">{m.content}</div>
+              : <AnswerCard key={m.id} message={m} isLast={i === lastAssistant} canRegenerate={Boolean(conversationId) && models.length > 0} streaming={streaming}
+                  onRegenerate={() => send({ regenerate: true })} onOpenSources={ordinal => openSources(m.id, ordinal)} />)}
+            <div ref={endRef} />
+          </div>}
+          {error && <div className="error" role="alert">{error}</div>}
+          {modelsLoaded && !models.length && !error && <div className="setup-note">No model is connected. Start the local model with <code>npm run dev</code>, or add a provider key and model ID to <code>.env</code>.</div>}
+        </>}
+      </main>
+    </div>
+
+    {view === "chat" && <div className="dock">
+      <Composer value={prompt} onChange={setPrompt} onSend={() => send()} onStop={stop} streaming={streaming} disabled={!models.length}
+        placeholder={messages.length ? "Ask a follow-up…" : "Ask anything, untangle a problem, or start a project…"}
+        models={models} choice={choice} onChoice={setChoice} level={mode} onLevel={setMode} search={searchMode} onSearch={setSearchMode} onDeepResearch={() => go("research")} />
+      <div className="hint">Enter to send · Shift + Enter for a new line</div>
+    </div>}
     {view === "chat" && panelMessage?.sources?.length ? <SourcesPanel sources={panelMessage.sources} active={panel?.ordinal} onClose={() => setPanel(null)} /> : null}
   </div>;
 }

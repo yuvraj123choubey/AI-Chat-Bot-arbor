@@ -12,6 +12,8 @@ export type ChatMessage = {
   id: string; role: "user" | "assistant"; content: string;
   status?: "streaming" | "complete" | "stopped" | "error"; meta?: Meta; stop?: string; error?: string; thinking?: boolean;
   steps?: Step[]; sources?: MessageSource[];
+  /** Measured in this browser session only: time to first text and to completion. */
+  firstTextMs?: number; elapsedMs?: number;
 };
 export type Summary = { id: string; title: string; updatedAt: string };
 export type StoredConversation = Summary & { messages: ChatMessage[] };

@@ -1,21 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, formatDate, typeLabel, type MessageSource, type SourceInfo } from "../api.ts";
+import { CloseIcon } from "./Icons.tsx";
 
-const initial = (s: SourceInfo) => (s.publisher || s.domain || "?").replace(/^www\./, "").charAt(0).toUpperCase();
-/** For papers, the journal says more than the DOI resolver's domain. */
-const siteLabel = (s: SourceInfo) => (s.domain === "doi.org" && s.publisher ? s.publisher : s.domain);
-
-/** Compact row of the numbered sources under a searched answer. */
-export function SourceStrip({ sources, onOpen }: { sources: MessageSource[]; onOpen(ordinal: number): void }) {
-  const shown = sources.slice(0, 4);
-  return <div className="source-strip">
-    {shown.map(s => <button type="button" key={s.ordinal} className="source-chip" onClick={() => onOpen(s.ordinal)} title={s.source.title}>
-      <span className="source-chip-top"><span className="source-mark">{initial(s.source)}</span><span className="source-domain">{siteLabel(s.source)}</span><span className="source-num">{s.ordinal}</span></span>
-      <span className="source-chip-title">{s.source.title}</span>
-    </button>)}
-    {sources.length > shown.length && <button type="button" className="source-chip more" onClick={() => onOpen(sources[shown.length].ordinal)}>+{sources.length - shown.length} more</button>}
-  </div>;
-}
 
 export function SourceCard({ source, ordinal, cited, active, onSavedChange }: { source: SourceInfo; ordinal?: number; cited?: boolean; active?: boolean; onSavedChange?(saved: boolean): void }) {
   const [saved, setSaved] = useState(source.saved);
@@ -49,10 +35,14 @@ export function SourcesPanel({ sources, active, onClose }: { sources: MessageSou
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   const cited = sources.filter(s => s.cited).length;
-  return <aside className="sources-panel" aria-label="Sources">
-    <div className="sources-panel-head"><div><strong>Sources</strong><small>{sources.length} read · {cited} cited</small></div><button type="button" onClick={onClose} aria-label="Close sources">✕</button></div>
-    <div className="sources-panel-list">{sources.map(s => <SourceCard key={s.ordinal} source={s.source} ordinal={s.ordinal} cited={s.cited} active={s.ordinal === active} />)}</div>
-  </aside>;
+  return <>
+    <div className="sheet-scrim" onClick={onClose} aria-hidden="true" />
+    <aside className="sources-panel glass" aria-label="Sources">
+      <div className="sheet-handle" aria-hidden="true" />
+      <div className="sources-panel-head"><div><strong><span className="dot" /> Sources</strong><small>{sources.length} read · {cited} cited</small></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close sources"><CloseIcon size={15} /></button></div>
+      <div className="sources-panel-list">{sources.map(s => <SourceCard key={s.ordinal} source={s.source} ordinal={s.ordinal} cited={s.cited} active={s.ordinal === active} />)}</div>
+    </aside>
+  </>;
 }
 
 /** Saved sources (and recently retrieved ones) across the workspace. */
