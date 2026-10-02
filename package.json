@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n db,api,web \"npm:dev:db\" \"npm:dev:api\" \"npm:dev:web\"",
+    "dev": "concurrently -n db,llm,api,web \"npm:dev:db\" \"npm:dev:llm\" \"npm:dev:api\" \"npm:dev:web\"",
     "dev:db": "tsx scripts/db.ts start",
     "dev:api": "tsx watch --include .env --include config/models.example.json apps/api/src/server.ts",
     "dev:web": "vite --config apps/web/vite.config.ts",
@@ -16,7 +16,8 @@
     "lint": "eslint .",
     "build": "tsc --noEmit && vite build --config apps/web/vite.config.ts",
     "test": "node --experimental-transform-types --test --test-timeout=60000 \"packages/*/test/*.test.ts\" \"apps/*/test/*.test.ts\"",
-    "check:search": "tsx scripts/check-search.ts"
+    "check:search": "tsx scripts/check-search.ts",
+    "dev:llm": "tsx apps/local-llm/src/server.ts"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
@@ -24,6 +25,7 @@
     "@prisma/client": "^7.10.0",
     "embedded-postgres": "^18.4.0-beta.17",
     "linkedom": "^0.18.13",
+    "node-llama-cpp": "^3.22.1",
     "pg": "^8.23.1",
     "prisma": "^7.10.0",
     "react": "^19.1.0",

@@ -1,6 +1,7 @@
 import { loadRegistry } from "../../../packages/ai/src/registry.ts";
 import { Orchestrator } from "../../../packages/ai/src/orchestrator.ts";
 import { DeepSeekProvider } from "../../../packages/ai/src/providers/deepseek.ts";
+import { LocalProvider } from "../../../packages/ai/src/providers/local.ts";
 import { OpenAIProvider } from "../../../packages/ai/src/providers/openai.ts";
 import { AnthropicProvider } from "../../../packages/ai/src/providers/anthropic.ts";
 import { GoogleProvider } from "../../../packages/ai/src/providers/google.ts";
@@ -37,7 +38,7 @@ export interface App {
 export interface AppOverrides { db?: Db; providers?: AIProvider[]; registry?: ModelDefinition[]; searchProviders?: SearchProvider[]; dataRoot?: string }
 
 export async function createApp(overrides: AppOverrides = {}): Promise<App> {
-  const providers = overrides.providers ?? [new OpenAIProvider(), new AnthropicProvider(), new GoogleProvider(), new DeepSeekProvider()];
+  const providers = overrides.providers ?? [new LocalProvider(), new OpenAIProvider(), new AnthropicProvider(), new GoogleProvider(), new DeepSeekProvider()];
   const providerMap = new Map<ProviderName, AIProvider>(providers.map(p => [p.name, p]));
   const registry = overrides.registry ?? await loadRegistry();
   const policy = parseAllowedProviders(providers);

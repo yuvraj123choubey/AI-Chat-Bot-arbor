@@ -1,4 +1,4 @@
-export type ProviderName = "openai" | "anthropic" | "google" | "deepseek" | (string & {});
+export type ProviderName = "local" | "openai" | "anthropic" | "google" | "deepseek" | (string & {});
 export type Capability = "fast" | "reasoning" | "coding" | "tools" | "vision" | "documents" | "large-context" | "technical-analysis";
 export type ReasoningMode = "fast" | "balanced" | "deep";
 export type TaskKind = "chat" | "research" | "code" | "math" | "browser" | "build";

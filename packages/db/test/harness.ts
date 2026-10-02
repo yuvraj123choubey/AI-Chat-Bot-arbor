@@ -18,7 +18,13 @@ async function freePort(): Promise<number> {
 }
 
 /** A throwaway PostgreSQL with the real migrations applied, so tests exercise the production schema. */
-export async function startTestDb(): Promise<TestDb> {
+export async function startTestDb(timeoutMs = 120_000): Promise<TestDb> {
+  // Fail with a clear message rather than hanging the suite if the machine is too busy to start PostgreSQL.
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Test database did not start within ${timeoutMs / 1000}s`)), timeoutMs); });
+  try { return await Promise.race([launch(), timeout]); } finally { clearTimeout(timer); }
+}
+async function launch(): Promise<TestDb> {
   const root = await mkdtemp(join(tmpdir(), "arbor-db-"));
   const port = await freePort();
   const pg = new EmbeddedPostgres({ databaseDir: join(root, "pgdata"), user: "arbor_test", password: "arbor_test", port, persistent: false, onLog: () => {}, onError: () => {} });

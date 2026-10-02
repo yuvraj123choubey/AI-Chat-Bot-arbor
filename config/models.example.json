@@ -1,5 +1,15 @@
 [
   {
+    "id": "local", "provider": "local", "modelIdEnv": "LOCAL_MODEL_ID", "modelId": "local", "displayName": "Local model", "capabilities": ["fast", "coding", "technical-analysis"],
+    "supportsStreaming": true, "supportsTools": false, "supportsVision": false, "supportsReasoning": false, "supportsCoding": true,
+    "contextWindow": 16384, "maxOutputTokens": 4096, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
+    "id": "local-thinking", "provider": "local", "modelIdEnv": "LOCAL_THINKING_MODEL_ID", "modelId": "local:thinking", "displayName": "Local model (thinking)", "capabilities": ["reasoning", "coding", "technical-analysis"],
+    "supportsStreaming": true, "supportsTools": false, "supportsVision": false, "supportsReasoning": true, "supportsCoding": true,
+    "contextWindow": 16384, "maxOutputTokens": 8192, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true
+  },
+  {
     "id": "openai-fast", "provider": "openai", "modelIdEnv": "OPENAI_FAST_MODEL", "modelId": "", "displayName": "OpenAI fast", "capabilities": ["fast", "tools", "vision"],
     "supportsStreaming": true, "supportsTools": true, "supportsVision": true, "supportsReasoning": false, "supportsCoding": false,
     "contextWindow": 0, "inputUsdPerMillion": 0, "outputUsdPerMillion": 0, "enabled": true

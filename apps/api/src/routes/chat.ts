@@ -68,7 +68,9 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     const userTurns = history.filter(m => m.role === "user");
     const question = userTurns.at(-1)!.content;
     const modelHistory: Message[] = history.map(m => ({ role: m.role, content: m.content }));
-    const steps: ResearchStatus[] = [];
+    // Research stages shown with the answer, plus notices (stage "notice") the user should still see after a reload.
+    const steps: (ResearchStatus | { stage: "notice"; label: string })[] = [];
+    const notice = (message: string) => { steps.push({ stage: "notice", label: message }); stream.write({ type: "notice", message }); };
     const context = { conversationId: conversation.id, workspaceId };
     let grounding: string | undefined;
     let ordinals = new Map<number, string>();
@@ -87,8 +89,8 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
           candidates: plannerCandidates(app, models, input), providers: app.providerMap, signal: stream.signal
         });
         if (plan.model) await app.recordUsage({ provider: plan.model.provider, model: plan.model.modelId, registryId: plan.model.id, task: "search", role: "query-planner", status: "complete", ...plan.usage, ...context });
-        const gathered = await gatherEvidence({ providers: app.searchProviders }, { question, queries: plan.queries, academic: intent.academic, depth: input.reasoningLevel, signal: stream.signal, onStatus: status });
-        for (const notice of gathered.notices) stream.write({ type: "notice", message: notice });
+        const gathered = await gatherEvidence({ providers: app.searchProviders }, { question, queries: plan.queries, focus: intent, depth: input.reasoningLevel, signal: stream.signal, onStatus: status });
+        for (const message of gathered.notices) notice(message);
         ordinals = await app.sources.attachToMessage(workspaceId, reply.id, gathered.evidence);
         const rows = await app.db.source.findMany({ where: { id: { in: [...ordinals.values()] } } });
         const byId = new Map(rows.map(r => [r.id, toSourceView(r)]));
@@ -101,7 +103,7 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
           return stream.end();
         }
         console.warn("Search failed:", error instanceof Error ? error.message : error);
-        stream.write({ type: "notice", message: "Web search failed, so this answer has no sources." });
+        notice("Web search failed, so this answer has no sources.");
         modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, []) };
       }
       grounding = citationRules;

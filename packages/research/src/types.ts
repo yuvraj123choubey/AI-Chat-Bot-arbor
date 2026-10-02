@@ -22,7 +22,7 @@ export interface SearchProvider {
   readonly id: string;
   readonly label: string;
   /** What this provider covers; the planner picks providers by intent. */
-  readonly coverage: "web" | "academic" | "encyclopedia";
+  readonly coverage: "web" | "academic" | "encyclopedia" | "news" | "technical";
   isConfigured(): boolean;
   search(query: string, options: SearchOptions): Promise<SearchResult[]>;
 }

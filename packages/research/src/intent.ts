@@ -1,5 +1,8 @@
 export type SearchMode = "auto" | "on" | "off";
-export interface SearchIntent { search: boolean; academic: boolean; reason: string }
+/** What kind of sources a question needs, which decides the search providers used. */
+export interface SearchFocus { academic: boolean; fresh: boolean; technical: boolean }
+export interface SearchIntent extends SearchFocus { search: boolean; reason: string }
+const technicalTerms = /\b(api|sdk|library|framework|npm|pip|python|javascript|typescript|java|c\+\+|c#|rust|golang|react|vue|angular|node(\.js)?|django|flask|sql|postgres|docker|kubernetes|linux|windows|git|compiler|runtime|exception|error|bug|install|configure|version)\b/i;
 
 const explicit = /\b(search|look ?up|google|browse|find (me )?(sources|articles|papers|studies|evidence|links)|with (sources|citations|references)|cite|citations?|sources?|references?|according to|fact[- ]check)\b/i;
 const fresh = /\b(latest|recent(ly)?|current(ly)?|today|tonight|yesterday|this (week|month|year)|news|now|20[2-3]\d|upcoming|released?|announced?|price|stock|weather|score|election)\b/i;
@@ -15,16 +18,17 @@ const smallTalk = /^(hi|hello|hey|thanks|thank you|ok|okay|cool|great|good (morn
  */
 export function searchIntent(message: string, mode: SearchMode): SearchIntent {
   const text = message.trim();
-  const academic = academicTerms.test(text);
-  if (mode === "off") return { search: false, academic, reason: "search turned off" };
-  if (mode === "on") return { search: true, academic, reason: "search turned on" };
-  if (explicit.test(text)) return { search: true, academic, reason: "asked for sources" };
-  if (smallTalk.test(text) && text.length < 40) return { search: false, academic, reason: "small talk" };
-  if (notSearch.test(text)) return { search: false, academic, reason: "writing, coding or maths" };
-  if (fresh.test(text)) return { search: true, academic, reason: "time-sensitive" };
-  if (academic) return { search: true, academic, reason: "asks about research" };
-  if (factual.test(text) && text.split(/\s+/).length >= 4) return { search: true, academic, reason: "factual question" };
-  return { search: false, academic, reason: "conversational" };
+  const focus: SearchFocus = { academic: academicTerms.test(text), fresh: fresh.test(text), technical: technicalTerms.test(text) };
+  const decide = (search: boolean, reason: string): SearchIntent => ({ search, reason, ...focus });
+  if (mode === "off") return decide(false, "search turned off");
+  if (mode === "on") return decide(true, "search turned on");
+  if (explicit.test(text)) return decide(true, "asked for sources");
+  if (smallTalk.test(text) && text.length < 40) return decide(false, "small talk");
+  if (notSearch.test(text)) return decide(false, "writing, coding or maths");
+  if (focus.fresh) return decide(true, "time-sensitive");
+  if (focus.academic) return decide(true, "asks about research");
+  if (factual.test(text) && text.split(/\s+/).length >= 4) return decide(true, "factual question");
+  return decide(false, "conversational");
 }
 
 /** Fallback queries when no model is available to write them: the question without conversational filler. */

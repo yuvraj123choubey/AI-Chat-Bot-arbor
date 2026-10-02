@@ -3,6 +3,7 @@ import { extractHtml, extractPlainText, tidy, type ExtractedPage } from "./extra
 import { canonicalUrl, classifySource, domainOf } from "./url.ts";
 import { Bm25, queryTerms, selectEvidence, type EvidenceLimits } from "./passages.ts";
 import type { EvidenceSource, ResearchStatus, RetrievedSource, SearchProvider, SearchResult } from "./types.ts";
+import type { SearchFocus } from "./intent.ts";
 
 export type Depth = "fast" | "balanced" | "deep";
 const budgets: Record<Depth, { perProvider: number; read: number; evidence: EvidenceLimits }> = {
@@ -21,7 +22,7 @@ export interface GatherDeps {
 export interface GatherOptions {
   question: string;
   queries: string[];
-  academic: boolean;
+  focus: SearchFocus;
   depth: Depth;
   signal?: AbortSignal;
   onStatus?: (status: ResearchStatus) => void;
@@ -30,22 +31,29 @@ export interface GatherOptions {
 }
 export interface GatherResult { evidence: EvidenceSource[]; retrieved: RetrievedSource[]; providers: string[]; notices: string[] }
 
-export function chooseProviders(all: SearchProvider[], academic: boolean): { chosen: SearchProvider[]; notices: string[] } {
+/**
+ * Picks providers by what the question needs: general web (if one is set up) and the encyclopedia always;
+ * scholarly works for research questions or when there is no general web search; news for time-sensitive
+ * questions; technical Q&A for programming questions.
+ */
+export function chooseProviders(all: SearchProvider[], focus: SearchFocus): { chosen: SearchProvider[]; notices: string[] } {
   const configured = all.filter(p => p.isConfigured());
-  const web = configured.filter(p => p.coverage === "web");
-  const chosen = configured.filter(p => p.coverage === "web" || p.coverage === "encyclopedia" || (p.coverage === "academic" && (academic || !web.length)));
-  const notices = web.length ? [] : ["General web search is not configured, so results come from Wikipedia and OpenAlex. Add BRAVE_SEARCH_API_KEY for full web search."];
+  const web = configured.some(p => p.coverage === "web");
+  const wanted: Record<SearchProvider["coverage"], boolean> = { web: true, encyclopedia: true, academic: focus.academic || !web, news: focus.fresh, technical: focus.technical };
+  const chosen = configured.filter(p => wanted[p.coverage]);
+  const notices = web ? [] : ["General web search isn't set up, so results come from free sources (Wikipedia, OpenAlex, news and Q&A archives). Set SEARXNG_URL to a SearXNG instance for full web results."];
   return { chosen, notices };
 }
 
 export async function gatherEvidence(deps: GatherDeps, options: GatherOptions): Promise<GatherResult> {
   const budget = budgets[options.depth];
-  const { chosen, notices } = chooseProviders(deps.providers, options.academic);
+  const { chosen, notices } = chooseProviders(deps.providers, options.focus);
   if (!chosen.length) throw new Error("No search provider is available.");
   const status = options.onStatus || (() => {});
 
   status({ stage: "searching", label: "Searching", detail: options.queries.join(" · ") });
-  const settled = await Promise.allSettled(chosen.flatMap(provider => options.queries.map(q => provider.search(q, { limit: budget.perProvider, signal: options.signal }))));
+  // Rate-limited news search gets only the first query, so it adds at most one wait.
+  const settled = await Promise.allSettled(chosen.flatMap(provider => (provider.coverage === "news" ? options.queries.slice(0, 1) : options.queries).map(q => provider.search(q, { limit: budget.perProvider, signal: options.signal }))));
   options.signal?.throwIfAborted();
   const results = settled.flatMap(s => s.status === "fulfilled" ? s.value : []);
   const failed = settled.filter(s => s.status === "rejected").length;

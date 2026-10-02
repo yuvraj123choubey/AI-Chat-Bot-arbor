@@ -2,9 +2,9 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ModelDefinition, ProviderName } from "./types.ts";
 
-const validProviders = new Set(["openai", "anthropic", "google", "deepseek"]);
+const validProviders = new Set(["local", "openai", "anthropic", "google", "deepseek"]);
 /** User-facing provider names; Anthropic models are presented as Claude. */
-export const providerLabels: Record<string, string> = { openai: "OpenAI", anthropic: "Claude", google: "Gemini", deepseek: "DeepSeek" };
+export const providerLabels: Record<string, string> = { local: "Local", openai: "OpenAI", anthropic: "Claude", google: "Gemini", deepseek: "DeepSeek" };
 export function providerLabel(provider: ProviderName): string { return providerLabels[provider] || provider; }
 
 export async function loadRegistry(path = process.env.MODEL_CONFIG_PATH || "config/models.example.json", env: NodeJS.ProcessEnv = process.env): Promise<ModelDefinition[]> {

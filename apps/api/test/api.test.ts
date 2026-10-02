@@ -128,7 +128,7 @@ test("searched answers get sources, backend-checked citations and stored citatio
   const reply = conversation.messages[1];
   assert.equal(reply.content.trim(), done.content.trim());
   assert.deepEqual(reply.sources.map((s: any) => [s.ordinal, s.cited]), [[1, true], [2, true]]);
-  assert.deepEqual(reply.steps.map((s: any) => s.stage), ["searching", "reading", "comparing", "writing"]);
+  assert.deepEqual(reply.steps.filter((s: any) => s.stage !== "notice").map((s: any) => s.stage), ["searching", "reading", "comparing", "writing"]);
   const citations = await app.db.citation.findMany({ where: { messageId: reply.id }, orderBy: { ordinal: "asc" } });
   assert.deepEqual(citations.map(c => [c.ordinal, c.claim]), [[1, "Offline backups are the key defense."], [2, "Patching matters too."]]);
 

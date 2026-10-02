@@ -110,7 +110,7 @@ test("the pipeline searches, reads pages, and returns numbered evidence with sta
       if (url.includes("down")) throw new Error("offline");
       return { url, status: 200, contentType: "text/html", body: Buffer.from(`<html><head><title>Guide</title><meta name="author" content="A. Writer"><meta property="article:published_time" content="2025-05-01"></head><body><article><h1>Ransomware defense guide</h1>${"<p>Offline backups and patching are the core ransomware defenses for organisations of every size.</p>".repeat(8)}</article></body></html>`) };
     }
-  }, { question: "ransomware defenses", queries: ["ransomware defenses"], academic: false, depth: "balanced", onStatus: s => statuses.push(s.stage) });
+  }, { question: "ransomware defenses", queries: ["ransomware defenses"], focus: { academic: false, fresh: false, technical: false }, depth: "balanced", onStatus: s => statuses.push(s.stage) });
   assert.deepEqual(statuses, ["searching", "reading", "comparing"]);
   assert.ok(!fetched.some(u => u.includes("wiki")), "provider-supplied full text is not re-fetched");
   const guide = result.evidence.find(e => e.source.url === "https://news.example/ransomware")!;
@@ -126,10 +126,10 @@ test("the pipeline searches, reads pages, and returns numbered evidence with sta
 
 test("provider choice discloses missing web search", () => {
   const p = (id: string, coverage: SearchProvider["coverage"], configured = true): SearchProvider => ({ id, label: id, coverage, isConfigured: () => configured, search: async () => [] });
-  const without = chooseProviders([p("brave", "web", false), p("wiki", "encyclopedia"), p("openalex", "academic")], false);
+  const without = chooseProviders([p("brave", "web", false), p("wiki", "encyclopedia"), p("openalex", "academic")], { academic: false, fresh: false, technical: false });
   assert.deepEqual(without.chosen.map(x => x.id), ["wiki", "openalex"]);
   assert.equal(without.notices.length, 1);
-  const withWeb = chooseProviders([p("brave", "web"), p("wiki", "encyclopedia"), p("openalex", "academic")], false);
+  const withWeb = chooseProviders([p("brave", "web"), p("wiki", "encyclopedia"), p("openalex", "academic")], { academic: false, fresh: false, technical: false });
   assert.deepEqual(withWeb.chosen.map(x => x.id), ["brave", "wiki"]);
 });
 

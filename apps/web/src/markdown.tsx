@@ -1,12 +1,22 @@
-import React, { useState } from "react";
+import React, { createContext, useContext, useState } from "react";
+
+/** Numbered sources an answer may cite. Markers for any other number are hidden, never shown as citations. */
+export interface Citations { ordinals: Set<number>; titles: Map<number, string>; onCite(ordinal: number): void }
+const CitationContext = createContext<Citations | null>(null);
 
 /**
  * Minimal Markdown for model answers: fenced code, headings, lists, quotes, tables, rules and inline
- * code/bold/italic/links. Output is built from React elements, never raw HTML, so model text cannot inject markup.
- * Unclosed code fences render as code, which keeps partially streamed answers readable.
+ * code/bold/italic/links/citations. Output is built from React elements, never raw HTML, so model text cannot
+ * inject markup. Unclosed code fences render as code, which keeps partially streamed answers readable.
  */
-export function Markdown({ text }: { text: string }) {
-  return <>{blocks(text)}</>;
+export function Markdown({ text, citations }: { text: string; citations?: Citations }) {
+  return <CitationContext.Provider value={citations ?? null}>{blocks(text)}</CitationContext.Provider>;
+}
+function Cite({ n, raw }: { n: number; raw: string }) {
+  const citations = useContext(CitationContext);
+  if (!citations) return <>{raw}</>;
+  if (!citations.ordinals.has(n)) return null;
+  return <button type="button" className="cite" title={citations.titles.get(n)} aria-label={`Source ${n}: ${citations.titles.get(n) ?? ""}`} onClick={() => citations.onCite(n)}>{n}</button>;
 }
 
 function blocks(text: string): React.ReactNode[] {
@@ -73,7 +83,7 @@ function withBreaks(text: string): React.ReactNode[] {
   return text.split("\n").flatMap((part, k) => k ? [<br key={`b${k}`} />, ...inline(part, `l${k}`)] : inline(part, `l${k}`));
 }
 function inline(text: string, prefix = "i"): React.ReactNode[] {
-  const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*|__[^_]+__)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*|__[^_]+__)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|\[(\d{1,3})\](?!\()|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
   const out: React.ReactNode[] = [];
   let last = 0;
   for (const m of text.matchAll(pattern)) {
@@ -82,7 +92,8 @@ function inline(text: string, prefix = "i"): React.ReactNode[] {
     if (m[1]) out.push(<code key={key}>{m[1].slice(1, -1)}</code>);
     else if (m[2]) out.push(<strong key={key}>{inline(m[2].slice(2, -2), key)}</strong>);
     else if (m[3]) out.push(<em key={key}>{inline(m[3].slice(1, -1), key)}</em>);
-    else out.push(<a key={key} href={m[5]} target="_blank" rel="noreferrer noopener">{m[4]}</a>);
+    else if (m[4]) out.push(<Cite key={key} n={Number(m[4])} raw={m[0]} />);
+    else out.push(<a key={key} href={m[6]} target="_blank" rel="noreferrer noopener">{m[5]}</a>);
     last = m.index! + m[0].length;
   }
   if (last < text.length) out.push(text.slice(last));
