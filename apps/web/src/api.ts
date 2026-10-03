@@ -17,7 +17,7 @@ export type DocumentPreview =
   | { kind: "pages"; total: number; from: number; to: number; pages: { page: number; text: string }[] }
   | { kind: "sections"; total: number; from: number; to: number; sections: { index: number; section: string | null; text: string }[] }
   | { kind: "lines"; total: number; from: number; to: number; lines: { n: number; text: string }[] }
-  | { kind: "image" };
+  | { kind: "image"; text: string };
 export const documentKinds: Record<string, string> = { upload: "Upload", course_material: "Course material", assignment_instructions: "Instructions", rubric: "Rubric", lecture: "Lecture", starter_code: "Starter code", screenshot: "Screenshot" };
 export const documentTitle = (d: { name: string; displayName?: string | null }) => d.displayName || d.name;
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;

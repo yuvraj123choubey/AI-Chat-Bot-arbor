@@ -76,7 +76,7 @@ export function FileLibrary() {
         <span className="file-type">{typeName(d)}</span>
         <div className="file-main">
           <button type="button" className="file-name" onClick={() => openDocumentPreview(d.id)} disabled={d.status === "failed"} title="Preview">{documentTitle(d)}</button>
-          <small>{d.displayName && d.displayName !== d.name ? `${d.name} · ` : ""}{documentKinds[d.kind] && d.kind !== "upload" ? `${documentKinds[d.kind]} · ` : ""}{formatBytes(d.sizeBytes)}{d.pageCount ? ` · ${d.pageCount} page${d.pageCount === 1 ? "" : "s"}` : ""}{d.chunkCount ? ` · ${d.chunkCount} passages` : ""} · {formatDate(d.createdAt)}</small>
+          <small>{d.displayName && d.displayName !== d.name ? `${d.name} · ` : ""}{documentKinds[d.kind] && d.kind !== "upload" ? `${documentKinds[d.kind]} · ` : ""}{formatBytes(d.sizeBytes)}{d.pageCount ? ` · ${d.pageCount} page${d.pageCount === 1 ? "" : "s"}` : ""}{d.mimeType.startsWith("image/") && d.status === "ready" ? (d.chunkCount ? " · text read (OCR)" : " · no readable text") : d.chunkCount ? ` · ${d.chunkCount} passages` : ""} · {formatDate(d.createdAt)}</small>
           {d.status === "failed" && d.error && <small className="file-error">{d.error}</small>}
           {(d.links?.length ?? 0) > 0 && <div className="file-links">{d.links!.map(l => <span key={l.id} className="file-link">{typeLabel[l.type]}: {targetLabel(l)}<button type="button" onClick={() => void run(() => api.unlinkDocument(d.id, l.id))} aria-label="Detach"><CloseIcon size={10} /></button></span>)}</div>}
           {attaching === d.id && <div className="attach-row">

@@ -1,14 +1,25 @@
 import { parseHTML } from "linkedom";
+import { recognizeText } from "./ocr.ts";
 import { EmptyDocumentError, type DocumentUnit, type FileType, type ParsedDocument } from "./types.ts";
 
-/** Turns an upload into units that keep their place (page, section, first line) for citations. */
+/** Section label of the text recognised in an image, so answers and previews can say where it came from. */
+export const IMAGE_TEXT_SECTION = "Text read from the image (OCR)";
+
+/**
+ * Turns an upload into units that keep their place (page, section, first line) for citations. Images are read with
+ * local text recognition; an image with no readable text is still kept (with no units), so it counts as present
+ * evidence that could not be inspected rather than as a failed upload.
+ */
 export async function parseDocument(bytes: Buffer, type: FileType, name: string): Promise<ParsedDocument> {
+  if (type.kind === "image") {
+    const ocr = await recognizeText(bytes);
+    return { units: ocr.text ? [{ text: ocr.text, section: IMAGE_TEXT_SECTION }] : [], title: name, ocr: { confidence: ocr.confidence } };
+  }
   const parsed = await (type.kind === "pdf" ? parsePdf(bytes)
     : type.kind === "docx" ? parseDocx(bytes)
     : type.kind === "markdown" ? parseMarkdown(bytes.toString("utf8"))
     : type.kind === "code" ? { units: [{ text: normalise(bytes.toString("utf8")), firstLine: 1 }] }
-    : type.kind === "text" ? { units: [{ text: normalise(bytes.toString("utf8")), firstLine: 1 }] }
-    : Promise.reject(new EmptyDocumentError("Text recognition for images isn't available yet, so this image can't be searched.")));
+    : { units: [{ text: normalise(bytes.toString("utf8")), firstLine: 1 }] });
   const units = parsed.units.filter(u => u.text.trim());
   if (!units.length) {
     throw new EmptyDocumentError(type.kind === "pdf" ? "This PDF has no extractable text (it may be a scanned image)." : "This file has no text to read.");

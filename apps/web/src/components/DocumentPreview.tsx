@@ -64,9 +64,9 @@ export function DocumentPreview({ id, locator, onClose }: { id: string; locator?
   }, [preview, locator]);
 
   const matches = useMemo(() => {
-    if (!preview || !term.trim() || preview.kind === "image") return 0;
+    if (!preview || !term.trim()) return 0;
     const re = new RegExp(term.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    const texts = preview.kind === "pages" ? preview.pages.map(p => p.text) : preview.kind === "sections" ? preview.sections.map(s => s.text) : preview.lines.map(l => l.text);
+    const texts = preview.kind === "image" ? [preview.text] : preview.kind === "pages" ? preview.pages.map(p => p.text) : preview.kind === "sections" ? preview.sections.map(s => s.text) : preview.lines.map(l => l.text);
     return texts.reduce((n, t) => n + (t.match(re)?.length ?? 0), 0);
   }, [preview, term]);
   const shown = preview && preview.kind !== "image" ? { from: preview.from, to: preview.to, total: preview.total, unit: preview.kind === "pages" ? "page" : preview.kind === "sections" ? "section" : "line" } : null;
@@ -93,7 +93,10 @@ export function DocumentPreview({ id, locator, onClose }: { id: string; locator?
       <div className="doc-preview-body" ref={body} style={{ fontSize: `${13 * zoom}px` }}>
         {error ? <div className="error" role="alert">{error}</div>
           : !preview ? <p className="thinking">Loading…</p>
-            : preview.kind === "image" ? <img className="doc-image" src={`/api/documents/${id}/file`} alt={doc ? documentTitle(doc) : "Uploaded image"} />
+            : preview.kind === "image" ? <>
+              <img className="doc-image" src={`/api/documents/${id}/file`} alt={doc ? documentTitle(doc) : "Uploaded image"} />
+              <section className="doc-page"><div className="doc-page-label">Text read from this image (OCR) — the only part of it Arbor can use</div><div className="doc-text">{preview.text.trim() ? highlight(preview.text, term) : <em>No text could be read from this image, so Arbor can&apos;t use its content.</em>}</div></section>
+            </>
               : preview.kind === "pages" ? preview.pages.map(p => <section key={p.page} data-page={p.page} className={`doc-page${p.page === locator?.page ? " cited" : ""}`}><div className="doc-page-label">Page {p.page}{p.page === locator?.page && " · cited"}</div><div className="doc-text">{p.text.trim() ? highlight(p.text, term) : <em>No text on this page.</em>}</div></section>)
                 : preview.kind === "sections" ? preview.sections.map(s => <section key={s.index} data-section={s.section ?? ""} className={`doc-page${s.section && s.section === locator?.section ? " cited" : ""}`}>{s.section && <div className="doc-page-label">{s.section}</div>}<div className="doc-text">{highlight(s.text, term)}</div></section>)
                   : isCode && !term ? <React.Suspense fallback={<p className="thinking">Loading…</p>}><div className="doc-code"><CodeEditor path={doc!.name} value={preview.lines.map(l => l.text).join("\n")} readOnly firstLine={preview.from} line={locator?.lines?.[0]} lineEnd={locator?.lines?.[1]} /></div></React.Suspense>

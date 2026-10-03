@@ -32,6 +32,9 @@ class StubProvider implements AIProvider {
       }
       case "research_gaps": return reply(JSON.stringify({ missing: [], conflicts: [] }));
     }
+    if (request.messages[0].content.startsWith("You check ONE requirement")) {
+      return reply(/REQUIREMENT \(Task 1/.test(user) ? "MET | Explains the status output | \"it shows Status: active\"" : "MISSING | Not done | \"\"");
+    }
     if (request.messages[0].content.startsWith("You write research reports")) return reply("## Summary\nOffline backups allow recovery [1]. Made-up claim [8].");
     if (request.messages[0].content.startsWith("You take research notes")) return reply(`- Offline backups allow recovery without paying. [${Number(user.match(/^\[(\d+)\]/m)?.[1] ?? 1)}]`);
     return reply('{"queries": ["ransomware backup defenses"]}');
@@ -379,6 +382,43 @@ test("files: the library is used when the question refers to it; Scope 'files' n
   assert.ok(scoped.events.some(e => e.type === "notice" && /Nothing in your files matched/.test(e.message)));
   const unrelated = await chat({ message: "hello there", searchMode: "off" });
   assert.ok(!unrelated.events.some(e => e.type === "sources"), "an unrelated chat does not pull in files");
+});
+
+test("study: 'is my submission complete?' checks each requirement; follow-ups keep the conversation's files", async () => {
+  const uploadReady = async (name: string, text: string) => {
+    const { document, taskId } = await (await upload(name, Buffer.from(text))).json();
+    await followTask(taskId);
+    return document.id as string;
+  };
+  const lab = await uploadReady("lab5.md", "# Lab 5\n\n## Task 1: Check status\nRun ufw status and explain the output.\n\n## Task 2: Block port 8080\nBlock port 8080 and include a screenshot of the rule list.\n");
+  const work = await uploadReady("submission.md", "# My answers\n\n## Task 1\nI ran ufw status; it shows Status: active, so the firewall is on.\n");
+  const streamsBefore = provider.requests.filter(r => !r.responseFormat && r.messages.at(-1)!.content.includes("<<<")).length;
+  const review = await chat({ message: "Is my submission complete?", documentIds: [lab, work] });
+  const done = review.events.find(e => e.type === "done");
+  const content = done.content ?? review.events.filter(e => e.type === "delta").map(e => e.text).join("");
+  assert.match(content, /^\*\*Not yet\.\*\* 1 of 2 requirements are complete\./);
+  assert.match(content, /✓ \*\*Task 1\*\* — Complete — "it shows Status: active" \[2\]/);
+  assert.match(content, /✗ \*\*Task 2\*\* — Missing/);
+  assert.match(content, /### What to fix/);
+  const sources = review.events.find(e => e.type === "sources").sources;
+  assert.deepEqual(sources.map((s: any) => s.source.title), ["lab5.md", "submission.md"], "instructions are cited first");
+  assert.ok(review.events.some(e => e.type === "status" && e.label === "Checking requirements"));
+  assert.equal(provider.requests.filter(r => !r.responseFormat && r.messages.at(-1)!.content.includes("<<<")).length, streamsBefore, "the verdict is assembled from the checks, not written freely");
+
+  // A follow-up without attachments still studies the conversation's files, reading the named task.
+  const follow = await chat({ conversationId: review.conversationId, message: "What does task 2 ask me to do?" });
+  assert.ok(follow.events.find(e => e.type === "sources").sources.some((s: any) => s.source.title === "lab5.md"));
+  assert.match(lastAnswerRequest().messages.at(-1)!.content, /\(Task 2[^)]*\) ## Task 2: Block port 8080\nBlock port 8080 and include a screenshot/);
+  assert.match(lastAnswerRequest().messages.at(-1)!.content, /How the files were read:\nlab5\.md: read completely/);
+  // A different topic in the same conversation does not drag the files in.
+  const other = await chat({ conversationId: review.conversationId, message: "hello there", searchMode: "off" });
+  assert.ok(!other.events.some(e => e.type === "sources"));
+  // The attachments are part of the stored conversation.
+  const stored = await get(`/api/conversations/${review.conversationId}`);
+  assert.deepEqual(stored.messages[0].attachments, ["lab5.md", "submission.md"]);
+  // Asking about a task that does not exist is answered honestly.
+  const missing = await chat({ conversationId: review.conversationId, message: "What does task 9 say?" });
+  assert.match(missing.events.find(e => e.type === "done").content ?? "", /I couldn't find task 9 in your files/);
 });
 
 test("files: processing or missing files are refused; deleting removes the file and its sources", async () => {

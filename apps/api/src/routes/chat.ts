@@ -4,6 +4,7 @@ import { rankModels } from "../../../../packages/ai/src/router.ts";
 import type { Message, ModelDefinition, ReasoningMode } from "../../../../packages/ai/src/types.ts";
 import { citationClaims, citationRules, gatherEvidence, groundedUserPrompt, sanitizeCitations, sanitizeLinks, searchIntent, urls, type ResearchStatus, type SearchMode } from "../../../../packages/research/src/index.ts";
 import { claimsUnverifiable, type SearchIntent } from "../../../../packages/research/src/intent.ts";
+import { evidenceCoverage, gapNote, gapQueries, RESEARCH_AGAIN_BELOW } from "../../../../packages/research/src/coverage.ts";
 import { planQueries } from "../../../../packages/research/src/queries.ts";
 import { extractionMessages, factSheetBlock, parseFacts, sourcesForExtraction, type Fact } from "../../../../packages/research/src/facts.ts";
 import { applyVerdicts, claimsToVerify, enforcePrecision, ensureUnidentified, mentionOtherEvents, tidyAnswer, verifyMessages } from "../../../../packages/research/src/precision.ts";
@@ -11,7 +12,9 @@ import { eventAnswerRules } from "../../../../packages/research/src/prompt.ts";
 import type { EvidenceSource } from "../../../../packages/research/src/types.ts";
 import { generateText } from "../../../../packages/ai/src/structured.ts";
 import type { App } from "../app.ts";
+import { assignRoles, finalizeStudyAnswer, gatherMaterial, outlineDocument, planStudy, reviewAnswer, reviewSubmission, studyPrompt, studyRules, type StudyDoc, type StudyMaterial, type StudySheet } from "../../../../packages/study/src/index.ts";
 import { fileEvidence, questionRefersToFiles, strongFileMatch, type FileEvidence } from "../documents-evidence.ts";
+import { cachedStudySheet, loadStudyDocs, studyBudget, studyGenerate, studySheetFor } from "../study.ts";
 import { ndjson, readJson, send, type RouteContext } from "../http.ts";
 import { isConversationId, titleFrom, type MessageMeta } from "../repos/conversations.ts";
 import { toSourceView } from "../repos/sources.ts";
@@ -53,11 +56,13 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
   if (!models.length) return send(res, 503, { error: friendlyError("no_models") });
   if (input.selectedModel !== "auto" && !models.some(m => m.id === input.selectedModel)) return send(res, 400, { error: friendlyError("model_not_configured") });
   const workspaceId = await app.workspace(input.workspace);
+  let attachedDocs: { id: string; name: string }[] = [];
   if (input.documentIds.length) {
-    const docs = await app.db.document.findMany({ where: { id: { in: input.documentIds }, workspaceId }, select: { status: true, name: true } });
+    const docs = await app.db.document.findMany({ where: { id: { in: input.documentIds }, workspaceId }, select: { id: true, status: true, name: true, displayName: true } });
     if (docs.length !== input.documentIds.length) return send(res, 400, { error: "One of the attached files was not found." });
     const waiting = docs.find(d => d.status !== "ready");
     if (waiting) return send(res, 409, { error: waiting.status === "failed" ? `"${waiting.name}" could not be read, so it can't be used.` : `"${waiting.name}" is still being processed. Try again in a moment.` });
+    attachedDocs = input.documentIds.map(id => docs.find(d => d.id === id)!).map(d => ({ id: d.id, name: d.displayName || d.name }));
   }
 
   let conversation: { id: string; title: string; updatedAt: Date | string };
@@ -75,7 +80,9 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     if (input.regenerate) {
       if (!(await app.conversations.dropTrailingAssistants(conversation.id))) return send(res, 400, { error: "Nothing to regenerate" });
     } else {
-      await app.conversations.addMessage(conversation.id, { role: "user", content: input.message! });
+      await app.conversations.addMessage(conversation.id, { role: "user", content: input.message!, ...(attachedDocs.length ? { meta: { attachments: attachedDocs } } : {}) });
+      // Files attached to a conversation stay with it, so follow-up questions keep studying them.
+      for (const doc of attachedDocs) await app.documents.link(workspaceId, doc.id, "conversation", conversation.id, null);
     }
     const history = await app.conversations.history(conversation.id);
     // Only turns relevant to the latest message reach the model; a new topic starts clean.
@@ -109,6 +116,11 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     const normalized = input.searchMode === "off" ? { text: decision.searchText, corrections: [] } : await app.normalize(decision.searchText, stream.signal);
     const searchText = normalized.text;
     let files: FileEvidence = { evidence: [], locators: new Map(), strongest: 0 };
+    // Study of the user's documents for this turn: what the question needs, what was read, and (for a completeness
+    // check) the requirement-by-requirement answer, which is assembled from verified checks rather than written freely.
+    const studyPlan = planStudy(question);
+    let material: StudyMaterial | undefined;
+    let reviewText: string | undefined;
 
     /** Stores the numbered sources for this reply and sends them to the client before the answer streams. */
     const announceSources = async (list: EvidenceSource[]) => {
@@ -122,8 +134,8 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     const groundInFiles = async (): Promise<boolean> => {
       evidence = files.evidence;
       await announceSources(files.evidence);
-      modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, files.evidence) };
-      grounding = `${citationRules} ${fileRules}`;
+      modelHistory[modelHistory.length - 1] = { role: "user", content: material ? studyPrompt(question, studyPlan, material) : groundedUserPrompt(question, files.evidence) };
+      grounding = [citationRules, material ? studyRules : "", fileRules].filter(Boolean).join(" ");
       status({ stage: "writing", label: "Writing answer" });
       return true;
     };
@@ -137,7 +149,25 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
           candidates: plannerCandidates(app, models, input), providers: app.providerMap, signal: stream.signal
         });
         if (plan.model) await app.recordUsage({ provider: plan.model.provider, model: plan.model.modelId, registryId: plan.model.id, task: "search", role: "query-planner", status: "complete", ...plan.usage, ...context });
-        const gathered = await gatherEvidence({ providers: app.searchProviders }, { question: searchText, queries: plan.queries, focus: intent, depth: input.reasoningLevel, signal: stream.signal, onStatus: status });
+        let gathered = await gatherEvidence({ providers: app.searchProviders }, { question: searchText, queries: plan.queries, focus: intent, depth: input.reasoningLevel, signal: stream.signal, onStatus: status });
+        // When the results leave part of the question uncovered (a name, a code, a sub-topic), search once more aimed
+        // at what is missing; event questions already follow up inside the pipeline.
+        let gap = evidenceCoverage(searchText, gathered.evidence);
+        if (!intent.event && input.reasoningLevel !== "fast" && (!gathered.evidence.length || gap.coverage < RESEARCH_AGAIN_BELOW)) {
+          const more = gapQueries(searchText, gap, gathered.queries ?? plan.queries);
+          if (more.length) {
+            status({ stage: "searching", label: "Searching again", detail: gap.missing.length ? `The first results didn't cover: ${gap.missing.slice(0, 4).join(", ")}` : "The first results were too thin" });
+            try {
+              const second = await gatherEvidence({ providers: app.searchProviders }, { question: searchText, queries: more, focus: intent, depth: input.reasoningLevel, signal: stream.signal, onStatus: status, exclude: new Set(gathered.retrieved.map(r => r.canonicalUrl)) });
+              const merged = [...gathered.evidence, ...second.evidence].slice(0, input.reasoningLevel === "deep" ? 12 : 8).map((e, i) => ({ ...e, ordinal: i + 1 }));
+              gathered = { ...gathered, evidence: merged, retrieved: [...gathered.retrieved, ...second.retrieved], notices: [...new Set([...gathered.notices, ...second.notices])], queries: [...(gathered.queries ?? plan.queries), ...more] };
+              gap = evidenceCoverage(searchText, gathered.evidence);
+            } catch (error) {
+              if (stream.signal.aborted) throw error;
+            }
+          }
+        }
+        const gapText = gathered.evidence.length && !intent.event ? gapNote(gap, searchText) : "";
         for (const message of gathered.notices) notice(message);
         // The user's own files come first; web sources are numbered after them, so every [n] is unambiguous.
         const combined = [...files.evidence, ...gathered.evidence.map(e => ({ ...e, ordinal: e.ordinal + files.evidence.length }))];
@@ -166,8 +196,9 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
             status({ stage: "extracting", label: "Extracting details", detail: "skipped" });
           }
         }
-        modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, combined, sheet) };
-        grounding = [citationRules, intent.event ? eventAnswerRules : "", files.evidence.length ? fileRules : ""].filter(Boolean).join(" ");
+        const asked = gapText ? `${question}\n\n${gapText}` : question;
+        modelHistory[modelHistory.length - 1] = { role: "user", content: material && !sheet ? studyPrompt(asked, studyPlan, { ...material, evidence: combined }) : groundedUserPrompt(asked, combined, sheet) };
+        grounding = [citationRules, intent.event ? eventAnswerRules : "", material ? studyRules : "", files.evidence.length ? fileRules : ""].filter(Boolean).join(" ");
       } catch (error) {
         if (stream.signal.aborted) return false;
         console.warn("Search failed:", error instanceof Error ? error.message : error);
@@ -203,31 +234,92 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
       }
       throw new Error("The model stream ended without a result");
     };
+    /** An answer assembled by Arbor from verified checks (not written by a model) goes out like a streamed one. */
+    const deterministic = (text: string): Awaited<ReturnType<typeof answer>> => {
+      stream.write({ type: "delta", text });
+      return { event: { type: "done", usage: { inputTokens: 0, outputTokens: 0 } }, content: text, meta: undefined };
+    };
 
-    // The user's files: attached ones are always used; the library is used when the question refers to it or a
-    // passage matches very strongly; Scope "files"/"both" always looks, "web" never does.
+    /**
+     * Studies this turn's documents. "Is it complete?" checks every requirement against the submission and builds
+     * the answer from those checks. Any other question gathers what it needs: the whole material (with study notes
+     * when it is too long to send at once), or the named parts and matching passages. Returns false if stopped.
+     */
+    const studyFiles = async (docs: StudyDoc[]): Promise<boolean> => {
+      if (!docs.length) return true;
+      const generate = studyGenerate(app, plannerCandidates(app, models, input), context, stream.signal);
+      const sheets = new Map<string, StudySheet>();
+      const readSheet = async (doc: StudyDoc) => {
+        sheets.set(doc.id, await studySheetFor(app, doc, generate, (done, total) => status({ stage: "reading", label: "Studying your files", detail: `Reading ${doc.name} (part ${done} of ${total})` })));
+      };
+      status({ stage: "reading", label: "Studying your files", detail: `${docs.map(d => d.name).join(", ")} · ${studyPlan.scope === "review" ? "checking every requirement" : studyPlan.scope === "whole" ? "reading everything" : "finding the relevant parts"}` });
+      if (studyPlan.scope === "review") {
+        // Instructions without numbered tasks are read in full first, so their requirements can be listed.
+        for (const d of assignRoles(docs).docs) if ((d.role === "instructions" || d.role === "rubric") && outlineDocument(d.chunks).filter(s => s.level <= 2).length < 2) await readSheet(d);
+        const checked = await reviewSubmission({
+          docs, sheets, question, generate, signal: stream.signal, queryVector: async text => (await app.embedder.embed([text], "query"))[0],
+          onProgress: (done, total, label) => status({ stage: "verifying", label: "Checking requirements", detail: done < total ? `${label} (${done + 1} of ${total})` : `${total} requirements checked` })
+        });
+        // Sources: instructions first, then the work, then screenshots, so the citations read naturally.
+        const order = [...checked.instructions, ...checked.submissions, ...checked.screenshots].map(d => d.id);
+        const ordered = [...docs].sort((a, b) => (order.indexOf(a.id) + 1 || 99) - (order.indexOf(b.id) + 1 || 99));
+        const all = gatherMaterial({ question, plan: { scope: "whole", refs: [], reason: "review sources" }, docs: ordered, queryVector: [], budgetChars: 400_000 });
+        evidence = all.evidence;
+        await announceSources(all.evidence);
+        grounding = citationRules;
+        const ordinalOf = new Map(all.evidence.map(e => [String(e.source.metadata.documentId), e.ordinal]));
+        reviewText = reviewAnswer(checked, id => ordinalOf.get(id));
+        return !stream.signal.aborted;
+      }
+      const budget = studyBudget(input.selectedModel === "auto" ? models : models.filter(m => m.id === input.selectedModel));
+      const total = docs.reduce((n, d) => n + d.chunks.reduce((m, c) => m + c.text.length, 0), 0);
+      // The whole of a long document is understood through its study notes (built once, then reused).
+      if (studyPlan.scope === "whole" && total > budget) { for (const d of docs) await readSheet(d); }
+      else for (const d of docs) { const cached = await cachedStudySheet(app, d.id); if (cached) sheets.set(d.id, cached); }
+      const [vector] = await app.embedder.embed([searchText], "query");
+      material = gatherMaterial({ question: searchText, plan: studyPlan, docs, queryVector: vector, budgetChars: budget, sheets });
+      files = { evidence: material.evidence, locators: new Map(), strongest: 1 };
+      const modes = material.reading.map(r => `${r.name}: ${r.mode === "complete" ? "read completely" : r.mode === "sections" ? "relevant sections" : r.mode === "passages" ? "matching passages" : r.mode === "image-text" ? "text in image" : "image not readable"}`);
+      status({ stage: "reading", label: "Studying your files", detail: modes.join(" · ") });
+      return !stream.signal.aborted;
+    };
+
+    // Which of the user's documents this turn is about: the files attached now; files attached earlier in this
+    // conversation when the message follows up on them; otherwise library documents the question refers to or that
+    // match it very strongly. Scope "files"/"both" always looks, "web" never does.
     const scope = input.searchScope;
-    const attached = input.documentIds.length > 0;
-    const explicitFiles = attached || scope === "files" || scope === "both" || questionRefersToFiles(question);
-    if (scope !== "web" && (attached || (input.searchMode !== "off" || explicitFiles) && await app.documents.readyCount(workspaceId) > 0)) {
-      if (explicitFiles) status({ stage: "reading", label: "Reading your files", detail: attached ? `${input.documentIds.length} attached` : "Your library" });
-      try { files = await fileEvidence(app, workspaceId, searchText, { documentIds: input.documentIds, signal: stream.signal }); }
+    const earlier = scope === "web" ? [] : (await app.documents.linkedIds("conversation", conversation.id)).filter(id => !input.documentIds.includes(id));
+    const followsUp = earlier.length > 0 && (continuing || questionRefersToFiles(question) || studyPlan.scope !== "lookup" || studyPlan.refs.length > 0);
+    let studyIds = [...input.documentIds, ...(followsUp ? earlier : [])];
+    const explicitFiles = studyIds.length > 0 || scope === "files" || scope === "both" || questionRefersToFiles(question);
+    if (scope !== "web" && !studyIds.length && (input.searchMode !== "off" || explicitFiles) && await app.documents.readyCount(workspaceId) > 0) {
+      if (explicitFiles) status({ stage: "reading", label: "Reading your files", detail: "Your library" });
+      try { files = await fileEvidence(app, workspaceId, searchText, { signal: stream.signal }); }
       catch (error) {
         if (stream.signal.aborted) return stopped();
         console.warn("File search failed:", error instanceof Error ? error.message : error);
         if (explicitFiles) notice("Your files couldn't be searched right now.");
       }
-      if (!explicitFiles && strongFileMatch(files)) status({ stage: "reading", label: "Reading your files", detail: "A file in your library matches this question" });
-      else if (!explicitFiles) files = { evidence: [], locators: new Map(), strongest: 0 };
-      else if (!files.evidence.length) notice("Nothing in your files matched this question.");
+      if (explicitFiles || strongFileMatch(files)) studyIds = [...new Set(files.evidence.map(e => String(e.source.metadata.documentId)))].slice(0, 3);
+      if (!explicitFiles && studyIds.length) status({ stage: "reading", label: "Reading your files", detail: "A file in your library matches this question" });
+      else if (explicitFiles && !studyIds.length) notice("Nothing in your files matched this question.");
+      files = { evidence: [], locators: new Map(), strongest: 0 };
+    }
+    if (scope !== "web" && studyIds.length) {
+      try { if (!(await studyFiles(await loadStudyDocs(app, workspaceId, studyIds)))) return stopped(); }
+      catch (error) {
+        if (stream.signal.aborted) return stopped();
+        console.warn("Studying files failed:", error instanceof Error ? error.message : error);
+        notice("Your files couldn't be studied right now.");
+      }
     }
     const forcedWeb = scope === "web" || scope === "both";
     const intent = searchIntent(searchText, forcedWeb ? "on" : input.searchMode);
     // With files in play, Auto answers from them and only adds the web when search is set to Always or Scope asks for it.
-    const useWeb = scope === "files" ? false : forcedWeb ? true : files.evidence.length ? input.searchMode === "on" : intent.search;
+    const useWeb = reviewText !== undefined ? false : scope === "files" ? false : forcedWeb ? true : files.evidence.length ? input.searchMode === "on" : intent.search;
     if (useWeb) { if (!(await runSearch(intent))) return stopped(); }
-    else if (files.evidence.length) await groundInFiles();
-    let result = await answer();
+    else if (files.evidence.length && reviewText === undefined) await groundInFiles();
+    let result = reviewText !== undefined ? deterministic(reviewText) : await answer();
     // An unsearched answer must not claim something doesn't exist or can't be found: check first, then answer again.
     if (!grounding && input.searchMode === "auto" && decision.mode !== "ambiguous" && result.event.type === "done" && claimsUnverifiable(result.content)) {
       stream.write({ type: "reset", reason: "Checking with a web search before answering." });
@@ -241,12 +333,13 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     // each citation must support the exact detail beside it, and names found in no source are never kept.
     const allowed = new Set(ordinals.keys());
     const first = sanitizeCitations(content, allowed);
-    const precise = grounding && evidence.length ? enforcePrecision(first.text, evidence, question) : undefined;
+    // A completeness review is assembled from checked evidence, so it is not rewritten here.
+    const precise = grounding && evidence.length && reviewText === undefined ? enforcePrecision(first.text, evidence, question) : undefined;
     if (precise && (precise.recited || precise.uncited || precise.droppedSentences.length)) console.warn(`Precision check: ${precise.recited} citation(s) moved, ${precise.uncited} removed, ${precise.droppedSentences.length} sentence(s) with unsourced names dropped.`);
-    // For an event answer, claims that word overlap cannot confirm are checked against their source by a model;
-    // sentences judged unsupported are removed.
+    // For an answer about a specific event or from the user's files, claims that word overlap cannot confirm are
+    // checked against their source by a model; sentences judged unsupported are removed.
     let checked = precise?.text;
-    if (precise && intent.event && event.type === "done" && !stream.signal.aborted) {
+    if (precise && (intent.event || material) && event.type === "done" && !stream.signal.aborted) {
       const claims = claimsToVerify(precise.text, evidence);
       if (claims.length) {
         status({ stage: "verifying", label: "Verifying result", detail: `${claims.length} claims checked against their sources` });
@@ -262,7 +355,9 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
       }
     }
     // People the sources mention but do not name are always reported as not identified, never left out.
-    const completed = checked !== undefined && verifiedFacts.length ? ensureUnidentified(checked, verifiedFacts) : checked;
+    const identified = checked !== undefined && verifiedFacts.length ? ensureUnidentified(checked, verifiedFacts) : checked;
+    // Final consistency check for study answers: named parts that are not in the files, and images not inspected, are said plainly.
+    const completed = identified !== undefined && material ? finalizeStudyAnswer(identified, material) : identified;
     const cited = completed !== undefined ? sanitizeCitations(mentionOtherEvents(tidyAnswer(completed), matchedEvents, evidence), allowed) : first;
     const linked = sanitizeLinks(cited.text, [...sourceUrls, ...userUrls]);
     if (first.removed.length) console.warn(`Removed citation markers for unsupplied sources: ${first.removed.join(", ")}`);

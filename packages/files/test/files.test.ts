@@ -57,3 +57,23 @@ test("hybrid retrieval finds keyword and meaning matches and ignores unrelated t
   const [none] = await embedder.embed(["photosynthesis in plants"]);
   assert.deepEqual(retrieveChunks("photosynthesis in plants", none, chunks), []);
 });
+
+test("screenshots are read with local text recognition; an image without text is kept, not failed", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { IMAGE_TEXT_SECTION, previewDocument, stopOcr } = await import("../src/index.ts");
+  try {
+    const png = readFileSync(new URL("./fixtures/terminal.png", import.meta.url));
+    const parsed = await parseDocument(png, detectFileType("rules.png", png), "rules.png");
+    assert.equal(parsed.units.length, 1);
+    assert.equal(parsed.units[0].section, IMAGE_TEXT_SECTION);
+    assert.match(parsed.units[0].text, /sudo ufw deny 8080/);
+    assert.match(parsed.units[0].text, /8080 DENY Anywhere/);
+    assert.ok(parsed.ocr!.confidence > 50);
+    const preview = await previewDocument(png, "rules.png");
+    assert.equal(preview.kind, "image");
+    assert.match((preview as { text: string }).text, /Status: active/);
+    // A 1×1 transparent PNG has no text: kept with no units, not rejected as unreadable.
+    const blank = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
+    assert.deepEqual((await parseDocument(blank, detectFileType("blank.png", blank), "blank.png")).units, []);
+  } finally { await stopOcr(); }
+});

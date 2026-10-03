@@ -1,6 +1,8 @@
 import type { Db, Prisma } from "../../../../packages/db/src/client.ts";
 import type { ReasoningMode, TaskKind } from "../../../../packages/ai/src/types.ts";
 
+/** Stored on a user message: the files attached to it, so they show after a reload and later turns can keep using them. */
+export interface UserMeta { attachments: { id: string; name: string }[] }
 export interface MessageMeta { modelId: string; registryId: string; provider: string; providerLabel: string; displayName: string; reasoningLevel: ReasoningMode; taskKind: TaskKind; fallbackFrom: string[] }
 export interface MessageSourceView {
   ordinal: number; cited: boolean;
@@ -11,6 +13,8 @@ export interface MessageSourceView {
 export interface MessageView {
   id: string; role: "user" | "assistant"; content: string; createdAt: string;
   status?: "complete" | "stopped" | "error"; stop?: string; error?: string; meta?: MessageMeta; steps?: unknown; sources?: MessageSourceView[];
+  /** Names of the files attached to a user message. */
+  attachments?: string[];
 }
 export interface ConversationSummary { id: string; title: string; updatedAt: string }
 export interface ConversationView extends ConversationSummary { workspaceId: string; createdAt: string; messages: MessageView[] }
@@ -29,7 +33,7 @@ export function toMessageView(m: MessageRow): MessageView {
   return {
     id: m.id, role: m.role, content: m.content, createdAt: m.createdAt.toISOString(),
     ...(m.status ? { status: m.status } : {}), ...(m.stop ? { stop: m.stop } : {}), ...(m.error ? { error: m.error } : {}),
-    ...(m.meta ? { meta: m.meta as unknown as MessageMeta } : {}), ...(m.steps ? { steps: m.steps } : {}),
+    ...(m.meta && m.role === "user" ? { attachments: ((m.meta as unknown as UserMeta).attachments ?? []).map(a => a.name) } : m.meta ? { meta: m.meta as unknown as MessageMeta } : {}), ...(m.steps ? { steps: m.steps } : {}),
     ...(m.sources.length ? {
       sources: m.sources.map(s => ({
         ordinal: s.ordinal, cited: s.cited, ...(s.locator ? { locator: s.locator as MessageSourceView["locator"] } : {}),
@@ -56,7 +60,7 @@ export class ConversationRepo {
     return this.db.conversation.create({ data: { workspaceId, title } });
   }
   /** Appends at the next position and bumps the conversation so history lists it first. */
-  addMessage(conversationId: string, data: { role: "user" | "assistant"; content: string; meta?: MessageMeta }) {
+  addMessage(conversationId: string, data: { role: "user" | "assistant"; content: string; meta?: MessageMeta | UserMeta }) {
     return this.db.$transaction(async tx => {
       const last = await tx.message.findFirst({ where: { conversationId }, orderBy: { position: "desc" }, select: { position: true } });
       const message = await tx.message.create({ data: { conversationId, role: data.role, content: data.content, position: (last?.position ?? -1) + 1, meta: data.meta as unknown as Prisma.InputJsonValue } });

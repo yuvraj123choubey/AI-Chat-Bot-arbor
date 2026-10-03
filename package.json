@@ -39,6 +39,7 @@
     "@mozilla/readability": "^0.6.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
+    "@tesseract.js-data/eng": "^1.0.0",
     "busboy": "^1.6.0",
     "codemirror": "^6.0.2",
     "embedded-postgres": "^18.4.0-beta.17",
@@ -51,6 +52,7 @@
     "prisma": "^7.10.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "tesseract.js": "^7.0.0",
     "undici": "^8.11.2"
   },
   "devDependencies": {

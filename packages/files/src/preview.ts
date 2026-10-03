@@ -5,7 +5,7 @@ export type Preview =
   | { kind: "pages"; total: number; from: number; to: number; pages: { page: number; text: string }[] }
   | { kind: "sections"; total: number; from: number; to: number; sections: { index: number; section: string | null; text: string }[] }
   | { kind: "lines"; total: number; from: number; to: number; lines: { n: number; text: string }[] }
-  | { kind: "image" };
+  | { kind: "image"; /** Text recognised in the image (OCR), exactly what answers can use. */ text: string };
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -15,7 +15,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(Math.max(val
  */
 export async function previewDocument(bytes: Buffer, name: string, range: { from?: number; to?: number } = {}): Promise<Preview> {
   const type = detectFileType(name, bytes);
-  if (type.kind === "image") return { kind: "image" };
+  if (type.kind === "image") return { kind: "image", text: (await parseDocument(bytes, type, name)).units.map(u => u.text).join("\n") };
   if (type.kind === "text" || type.kind === "code" || type.kind === "markdown") {
     const raw = bytes.toString("utf8");
     const all = (raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw).replace(/\r\n?/g, "\n").split("\n");

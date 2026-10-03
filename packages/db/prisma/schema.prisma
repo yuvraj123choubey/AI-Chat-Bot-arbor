@@ -441,6 +441,7 @@ model Document {
   course       Course?                 @relation(fields: [courseId], references: [id], onDelete: SetNull)
   assignment   Assignment?             @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   chunks       DocumentChunk[]
+  study        DocumentStudy?
   sources      Source[]
   requirements AssignmentRequirement[]
   links        DocumentLink[]
@@ -464,6 +465,20 @@ model DocumentChunk {
   document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, ordinal])
+}
+
+/// What Arbor learned by reading a whole document: its requirements, deliverables, questions, concepts, terms,
+/// commands, restrictions and grading, each quoted from the document. Rebuilt when the study version changes.
+model DocumentStudy {
+  documentId String   @id
+  version    Int
+  /// Study sheet items: { kind, text, quote, page?, section?, lines? }[]
+  items      Json
+  windows    Int
+  rejected   Int
+  model      String?
+  createdAt  DateTime @default(now())
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 }
 
 // ---------------------------------------------------------------- assignments

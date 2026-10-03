@@ -4,7 +4,7 @@ export interface Locator { page?: number; section?: string; lines?: [number, num
 /** A natural region of a document: a PDF page, a DOCX/Markdown section, or a whole text/code file. */
 export interface DocumentUnit { text: string; page?: number; section?: string; firstLine?: number }
 
-export interface ParsedDocument { units: DocumentUnit[]; pageCount?: number; title?: string }
+export interface ParsedDocument { units: DocumentUnit[]; pageCount?: number; title?: string; /** Set for images: how sure text recognition was (0–100). */ ocr?: { confidence: number } }
 
 export interface Chunk extends Locator { ordinal: number; text: string }
 
