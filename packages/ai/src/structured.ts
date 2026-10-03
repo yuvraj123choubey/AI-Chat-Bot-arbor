@@ -8,6 +8,7 @@ export interface ModelCallOptions {
   providers: Map<ProviderName, AIProvider>;
   messages: Message[];
   maxOutputTokens?: number;
+  temperature?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Called after every attempt, so agent runs and usage can be recorded. */
@@ -36,7 +37,7 @@ async function attempt(model: ModelDefinition, options: ModelCallOptions, messag
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 180_000);
   try {
     const result = await options.providers.get(model.provider)!.generate({
-      model, messages, maxOutputTokens: options.maxOutputTokens, responseFormat, signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
+      model, messages, maxOutputTokens: options.maxOutputTokens, temperature: options.temperature, responseFormat, signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
     });
     await options.onCall?.({ model, usage: result.usage, ok: true, startedAt, finishedAt: new Date() });
     return result;

@@ -29,14 +29,15 @@ function json(value: unknown): Prisma.InputJsonValue {
  * Work runs in this process with a concurrency limit; a restart marks unfinished tasks as interrupted.
  */
 export class TaskEngine {
-  private readonly handlers = new Map<string, TaskHandler>();
-  private readonly running = new Map<string, AbortController>();
-  private readonly queue: string[] = [];
+  private readonly handlers = new Map<string, { handler: TaskHandler; concurrency?: number }>();
+  private readonly running = new Map<string, { controller: AbortController; type: string }>();
+  private readonly queue: { id: string; type: string }[] = [];
   private readonly listeners = new Map<string, Set<(event: TaskEvent) => void>>();
 
+  /** `concurrency` is the default per task type; a type can set its own (e.g. many file ingests, one deep research). */
   constructor(private readonly db: Db, private readonly concurrency = 1) {}
 
-  register(type: string, handler: TaskHandler) { this.handlers.set(type, handler); }
+  register(type: string, handler: TaskHandler, options: { concurrency?: number } = {}) { this.handlers.set(type, { handler, concurrency: options.concurrency }); }
 
   async recoverInterrupted(): Promise<number> {
     const { count } = await this.db.task.updateMany({ where: { status: { in: ["queued", "running", "waiting_approval"] } }, data: { status: "failed", error: "Interrupted by a server restart.", finishedAt: new Date() } });
@@ -47,24 +48,24 @@ export class TaskEngine {
   async submit(input: { workspaceId: string; userId?: string; type: string; title: string; input: Record<string, unknown> }): Promise<string> {
     if (!this.handlers.has(input.type)) throw new Error(`Unknown task type ${input.type}`);
     const task = await this.db.task.create({ data: { workspaceId: input.workspaceId, userId: input.userId, type: input.type, title: input.title.slice(0, 300), input: json(input.input) } });
-    this.queue.push(task.id);
+    this.queue.push({ id: task.id, type: input.type });
     void this.pump();
     return task.id;
   }
 
   async cancel(taskId: string): Promise<boolean> {
-    const queued = this.queue.indexOf(taskId);
+    const queued = this.queue.findIndex(q => q.id === taskId);
     if (queued >= 0) {
       this.queue.splice(queued, 1);
       await this.finish(taskId, "cancelled");
       return true;
     }
-    const controller = this.running.get(taskId);
-    controller?.abort(new Error("Cancelled"));
-    return Boolean(controller);
+    const running = this.running.get(taskId);
+    running?.controller.abort(new Error("Cancelled"));
+    return Boolean(running);
   }
 
-  isActive(taskId: string) { return this.running.has(taskId) || this.queue.includes(taskId); }
+  isActive(taskId: string) { return this.running.has(taskId) || this.queue.some(q => q.id === taskId); }
 
   /**
    * Listens to a task's events. Events already emitted are replayed first (kept while the task runs and for a
@@ -87,12 +88,17 @@ export class TaskEngine {
     for (const listener of this.listeners.get(taskId) ?? []) { try { listener(event); } catch { /* a broken listener must not stop the task */ } }
   }
 
+  /** Starts queued tasks, oldest first, as long as their type is under its concurrency limit. */
   private async pump() {
-    while (this.running.size < this.concurrency && this.queue.length) {
-      const taskId = this.queue.shift()!;
+    for (let i = 0; i < this.queue.length;) {
+      const { id, type } = this.queue[i];
+      const limit = this.handlers.get(type)?.concurrency ?? this.concurrency;
+      const active = [...this.running.values()].filter(r => r.type === type).length;
+      if (active >= limit) { i++; continue; }
+      this.queue.splice(i, 1);
       const controller = new AbortController();
-      this.running.set(taskId, controller);
-      void this.execute(taskId, controller).finally(() => { this.running.delete(taskId); void this.pump(); });
+      this.running.set(id, { controller, type });
+      void this.execute(id, controller).finally(() => { this.running.delete(id); void this.pump(); });
     }
   }
 
@@ -123,7 +129,7 @@ export class TaskEngine {
       }
     };
     try {
-      const output = await this.handlers.get(task.type)!(ctx);
+      const output = await this.handlers.get(task.type)!.handler(ctx);
       await this.finish(taskId, "completed", undefined, output);
     } catch (error) {
       if (controller.signal.aborted) await this.finish(taskId, "cancelled");

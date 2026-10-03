@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { api, formatDate, typeLabel, type MessageSource, type SourceInfo } from "../api.ts";
+import { api, documentHref, documentIdFromUrl, formatDate, locatorText, openDocumentPreview, typeLabel, type Locator, type MessageSource, type SourceInfo } from "../api.ts";
 import { CloseIcon } from "./Icons.tsx";
 
 
-export function SourceCard({ source, ordinal, cited, active, onSavedChange }: { source: SourceInfo; ordinal?: number; cited?: boolean; active?: boolean; onSavedChange?(saved: boolean): void }) {
+export function SourceCard({ source, ordinal, cited, active, locator, onSavedChange }: { source: SourceInfo; ordinal?: number; cited?: boolean; active?: boolean; locator?: Locator; onSavedChange?(saved: boolean): void }) {
+  const file = source.sourceType === "uploaded_file";
   const [saved, setSaved] = useState(source.saved);
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLElement>(null);
@@ -21,8 +22,9 @@ export function SourceCard({ source, ordinal, cited, active, onSavedChange }: { 
       {ordinal !== undefined && !cited && <span className="source-uncited" title="Given to the model but not cited in the answer">not cited</span>}
       <button type="button" className={`source-save${saved ? " on" : ""}`} onClick={toggle} disabled={busy} aria-pressed={saved}>{saved ? "★ Saved" : "☆ Save"}</button>
     </div>
-    <a className="source-title" href={source.url} target="_blank" rel="noreferrer noopener">{source.title} <span aria-hidden="true">↗</span></a>
-    <div className="source-meta">{source.domain}{by && ` · ${by}`}{source.publicationDate && ` · ${formatDate(source.publicationDate)}`}</div>
+    <a className="source-title" href={documentHref(source.url, locator)} target="_blank" rel="noreferrer noopener"
+      onClick={e => { const docId = file ? documentIdFromUrl(source.url) : undefined; if (docId) { e.preventDefault(); openDocumentPreview(docId, locator); } }}>{source.title} <span aria-hidden="true">{file ? "▸" : "↗"}</span></a>
+    <div className="source-meta">{file ? "Your file" : source.domain}{locator && locatorText(locator) ? <span className="source-locator"> · {locatorText(locator)}</span> : null}{!file && by && ` · ${by}`}{source.publicationDate && ` · ${formatDate(source.publicationDate)}`}</div>
     {source.snippet && <p className="source-snippet">{source.snippet.length > 280 ? `${source.snippet.slice(0, 277)}…` : source.snippet}</p>}
   </article>;
 }
@@ -40,7 +42,7 @@ export function SourcesPanel({ sources, active, onClose }: { sources: MessageSou
     <aside className="sources-panel glass" aria-label="Sources">
       <div className="sheet-handle" aria-hidden="true" />
       <div className="sources-panel-head"><div><strong><span className="dot" /> Sources</strong><small>{sources.length} read · {cited} cited</small></div><button type="button" className="icon-button" onClick={onClose} aria-label="Close sources"><CloseIcon size={15} /></button></div>
-      <div className="sources-panel-list">{sources.map(s => <SourceCard key={s.ordinal} source={s.source} ordinal={s.ordinal} cited={s.cited} active={s.ordinal === active} />)}</div>
+      <div className="sources-panel-list">{sources.map(s => <SourceCard key={s.ordinal} source={s.source} ordinal={s.ordinal} cited={s.cited} locator={s.locator} active={s.ordinal === active} />)}</div>
     </aside>
   </>;
 }

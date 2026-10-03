@@ -18,10 +18,21 @@ import { importLegacyConversations } from "./repos/legacy-import.ts";
 import { ResearchRepo } from "./repos/research.ts";
 import { TaskEngine } from "./tasks/engine.ts";
 import { deepResearchHandler } from "./tasks/deep-research.ts";
+import { DocumentRepo } from "./repos/documents.ts";
+import { ingestHandler } from "./tasks/ingest.ts";
+import { LocalEmbedder, type Embedder } from "../../../packages/files/src/index.ts";
+import { join } from "node:path";
+import { ProjectService } from "./repos/projects.ts";
+import { codeAgentHandler } from "./tasks/code-agent.ts";
 
 export interface App {
   tasks: TaskEngine;
   research: ResearchRepo;
+  documents: DocumentRepo;
+  /** Coding projects: files, version history, commands, previews. */
+  projects: ProjectService;
+  /** Local embedding model for uploaded documents (injectable for tests). */
+  embedder: Embedder;
   db: Db;
   identity: LocalIdentity;
   registry: ModelDefinition[];
@@ -43,7 +54,7 @@ export interface App {
   recordUsage(entry: Record<string, unknown>): Promise<void>;
 }
 
-export interface AppOverrides { db?: Db; providers?: AIProvider[]; registry?: ModelDefinition[]; searchProviders?: SearchProvider[]; dataRoot?: string; normalize?: App["normalize"] }
+export interface AppOverrides { db?: Db; providers?: AIProvider[]; registry?: ModelDefinition[]; searchProviders?: SearchProvider[]; dataRoot?: string; normalize?: App["normalize"]; embedder?: Embedder }
 
 export async function createApp(overrides: AppOverrides = {}): Promise<App> {
   const providers = overrides.providers ?? [new LocalProvider(), new OpenAIProvider(), new AnthropicProvider(), new GoogleProvider(), new DeepSeekProvider()];
@@ -63,9 +74,13 @@ export async function createApp(overrides: AppOverrides = {}): Promise<App> {
   const tasks = new TaskEngine(db, Number(process.env.TASK_CONCURRENCY) || 1);
   await tasks.recoverInterrupted();
   await research.markInterrupted();
+  const documents = new DocumentRepo(db, join(overrides.dataRoot ?? dataRoot, "files"));
+  await documents.markInterrupted();
 
   const app: App = {
-    db, identity, registry, providers, providerMap, policy, tasks, research,
+    db, identity, registry, providers, providerMap, policy, tasks, research, documents,
+    projects: new ProjectService(db, overrides.dataRoot ?? dataRoot),
+    embedder: overrides.embedder ?? new LocalEmbedder(),
     orchestrator: new Orchestrator(registry, providerMap),
     conversations, sources,
     searchProviders: overrides.searchProviders ?? searchProviders(),
@@ -87,7 +102,9 @@ export async function createApp(overrides: AppOverrides = {}): Promise<App> {
       }).catch(error => console.warn("Could not record usage:", error instanceof Error ? error.message : error));
     }
   };
-  tasks.register("deep_research", deepResearchHandler(app));
+  tasks.register("deep_research", deepResearchHandler(app), { concurrency: 1 });
+  tasks.register("document_ingest", ingestHandler(app), { concurrency: 2 });
+  tasks.register("code_agent", codeAgentHandler(app), { concurrency: 1 });
   return app;
 }
 

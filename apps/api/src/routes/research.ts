@@ -66,8 +66,9 @@ export function researchRoutes(app: App) {
       const task = (await app.db.task.findUnique({ where: { id: params[0] }, include: { steps: { orderBy: { ordinal: "asc" } } } }))!;
       const stream = ndjson(res);
       stream.write({ type: "snapshot", status: task.status, error: task.error, steps: task.steps.map(s => ({ id: s.id, ordinal: s.ordinal, kind: s.kind, title: s.title, status: s.status, startedAt: s.startedAt, finishedAt: s.finishedAt, error: s.error })) });
-      if (terminal.has(task.status) && !app.tasks.isActive(task.id)) { unsubscribe(); return stream.end(); }
+      // A task that already finished still replays the events it kept, so a client that connects late misses nothing.
       for (const event of buffered) stream.write(event);
+      if (terminal.has(task.status) && !app.tasks.isActive(task.id)) { unsubscribe(); return stream.end(); }
       if (!finished) {
         await new Promise<void>(resolve => {
           const heartbeat = setInterval(() => stream.write({ type: "heartbeat" }), 15_000);

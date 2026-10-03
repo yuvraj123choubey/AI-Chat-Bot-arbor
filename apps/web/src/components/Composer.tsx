@@ -1,11 +1,14 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type { Level, Model, SearchMode } from "../api.ts";
-import { ArrowIcon, ChevronIcon, CompassIcon, GlobeIcon, LayersIcon, MicIcon, StopIcon } from "./Icons.tsx";
+import type { Level, Model, SearchMode, SearchScope } from "../api.ts";
+import { ArrowIcon, ChevronIcon, CompassIcon, FileIcon, GlobeIcon, LayersIcon, MicIcon, StopIcon } from "./Icons.tsx";
+import { AttachmentChips, FilePickerButton, useFileDrop, type Upload } from "./Files.tsx";
 
 const levelLabel: Record<Level, string> = { fast: "Fast", balanced: "Balanced", deep: "Deep" };
 const searchLabel: Record<SearchMode, string> = { auto: "Auto", on: "Always", off: "Off" };
 const nextLevel: Record<Level, Level> = { fast: "balanced", balanced: "deep", deep: "fast" };
 const nextSearch: Record<SearchMode, SearchMode> = { auto: "on", on: "off", off: "auto" };
+const scopeLabel: Record<SearchScope, string> = { auto: "Auto", web: "Web", files: "Files", both: "Web + Files" };
+const nextScope: Record<SearchScope, SearchScope> = { auto: "web", web: "files", files: "both", both: "auto" };
 const capabilityText = (m: Model) => m.capabilities.filter(c => c !== "fast").slice(0, 3).join(" · ") || "general";
 
 export interface ComposerProps {
@@ -15,6 +18,8 @@ export interface ComposerProps {
   level: Level; onLevel(level: Level): void;
   search: SearchMode; onSearch(mode: SearchMode): void;
   onDeepResearch(): void;
+  scope: SearchScope; onScope(scope: SearchScope): void;
+  uploads: Upload[]; onAttach(files: File[]): void; onRemoveUpload(key: string): void;
 }
 
 /** The floating glass input: mode chips, the message box, model picker, dictation and send/stop. */
@@ -27,10 +32,18 @@ export function Composer(p: ComposerProps) {
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [p.value]);
-  return <div className="composer-card">
+  const drop = useFileDrop(p.onAttach);
+  // Attached files must finish processing before the message can use them.
+  const waiting = p.uploads.some(u => u.state === "uploading" || u.state === "processing");
+  return <div className={`composer-card${drop.over ? " dropping" : ""}`} {...drop.props}>
+    {drop.over && <div className="drop-hint">Drop files to attach them</div>}
+    <AttachmentChips uploads={p.uploads} onRemove={p.onRemoveUpload} />
     <div className="chip-row" role="group" aria-label="Answer settings">
       <button type="button" className={`chip${p.search !== "off" ? " on" : ""}`} onClick={() => p.onSearch(nextSearch[p.search])} title="Auto searches when a question needs facts; Always searches every message; Off never searches">
         <GlobeIcon size={12} /> Web search · {searchLabel[p.search]}
+      </button>
+      <button type="button" className={`chip${p.scope !== "auto" ? " on" : ""}`} onClick={() => p.onScope(nextScope[p.scope])} title="Where answers look for evidence: the web, your uploaded files, or both (Auto decides from the question)">
+        <FileIcon size={12} /> Sources · {scopeLabel[p.scope]}
       </button>
       <button type="button" className={`chip${p.level === "deep" ? " on" : ""}`} onClick={() => p.onLevel(nextLevel[p.level])} title="Fast keeps answers short; Deep uses a reasoning model and a larger budget">
         <LayersIcon size={12} /> Reasoning · {levelLabel[p.level]}
@@ -41,14 +54,16 @@ export function Composer(p: ComposerProps) {
     </div>
     <textarea ref={area} rows={2} value={p.value} placeholder={p.placeholder} aria-label="Message"
       onChange={e => p.onChange(e.target.value)}
-      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!p.streaming) p.onSend(); } }} />
+      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); if (!p.streaming && !waiting) p.onSend(); } }} />
     <div className="composer-bar">
       <ModelPicker models={p.models} choice={p.choice} onChoice={p.onChoice} />
       <div className="composer-actions">
+        {waiting && <span className="composer-wait">Processing files…</span>}
+        <FilePickerButton onFiles={p.onAttach} />
         <Dictation onText={text => p.onChange(p.value ? `${p.value.trimEnd()} ${text}` : text)} />
         {p.streaming
           ? <button type="button" className="send stop" onClick={p.onStop}><StopIcon size={13} /> Stop</button>
-          : <button type="button" className="send" disabled={p.disabled || !p.value.trim()} onClick={p.onSend}>Send <ArrowIcon size={14} /></button>}
+          : <button type="button" className="send" disabled={p.disabled || !p.value.trim() || waiting} onClick={p.onSend}>Send <ArrowIcon size={14} /></button>}
       </div>
     </div>
   </div>;

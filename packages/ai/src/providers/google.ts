@@ -15,7 +15,7 @@ export class GoogleProvider extends BaseProvider {
     return {
       ...(system.length ? { systemInstruction: { parts: system } } : {}),
       contents: request.messages.filter(m => m.role !== "system").map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
-      ...(request.maxOutputTokens ? { generationConfig: { maxOutputTokens: request.maxOutputTokens } } : {}),
+      ...(request.maxOutputTokens || request.temperature !== undefined ? { generationConfig: { ...(request.maxOutputTokens ? { maxOutputTokens: request.maxOutputTokens } : {}), ...(request.temperature !== undefined && !request.model.supportsReasoning ? { temperature: request.temperature } : {}) } } : {}),
       ...(request.tools?.length ? { tools: [{ functionDeclarations: request.tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters })) }] } : {})
     };
   }

@@ -4,6 +4,8 @@ import type { ReasoningMode, TaskKind } from "../../../../packages/ai/src/types.
 export interface MessageMeta { modelId: string; registryId: string; provider: string; providerLabel: string; displayName: string; reasoningLevel: ReasoningMode; taskKind: TaskKind; fallbackFrom: string[] }
 export interface MessageSourceView {
   ordinal: number; cited: boolean;
+  /** For uploaded files: where the cited passage is (page, section, line range). */
+  locator?: { page?: number; section?: string; lines?: [number, number] };
   source: { id: string; url: string; title: string; domain: string; author: string | null; publisher: string | null; publicationDate: string | null; snippet: string; sourceType: string; saved: boolean };
 }
 export interface MessageView {
@@ -30,7 +32,7 @@ export function toMessageView(m: MessageRow): MessageView {
     ...(m.meta ? { meta: m.meta as unknown as MessageMeta } : {}), ...(m.steps ? { steps: m.steps } : {}),
     ...(m.sources.length ? {
       sources: m.sources.map(s => ({
-        ordinal: s.ordinal, cited: s.cited,
+        ordinal: s.ordinal, cited: s.cited, ...(s.locator ? { locator: s.locator as MessageSourceView["locator"] } : {}),
         source: { id: s.source.id, url: s.source.url, title: s.source.title, domain: s.source.domain, author: s.source.author, publisher: s.source.publisher, publicationDate: s.source.publicationDate?.toISOString() ?? null, snippet: s.source.snippet, sourceType: s.source.sourceType, saved: s.source.saved }
       }))
     } : {})

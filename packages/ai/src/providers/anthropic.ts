@@ -12,6 +12,7 @@ export class AnthropicProvider extends BaseProvider {
   private body(request: GenerateRequest, stream = false) {
     return {
       model: request.model.modelId, max_tokens: request.maxOutputTokens || 4096, stream,
+      ...(request.temperature !== undefined && !request.model.supportsReasoning ? { temperature: request.temperature } : {}),
       system: request.messages.filter(m => m.role === "system").map(m => m.content).join("\n\n") || undefined,
       messages: request.messages.filter(m => m.role !== "system").map(m => ({ role: m.role, content: m.content })),
       ...(request.tools?.length ? { tools: request.tools.map(t => ({ name: t.name, description: t.description, input_schema: t.parameters })) } : {})

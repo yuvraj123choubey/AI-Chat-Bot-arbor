@@ -35,7 +35,7 @@ export interface ToolCall { id: string; name: string; arguments: Record<string, 
 export interface Usage { inputTokens: number; outputTokens: number }
 /** Ask for JSON matching a schema; providers that can enforce it do, others rely on the prompt and parsing. */
 export interface ResponseFormat { name: string; schema: Record<string, unknown> }
-export interface GenerateRequest { model: ModelDefinition; messages: Message[]; tools?: ToolDefinition[]; maxOutputTokens?: number; responseFormat?: ResponseFormat; signal?: AbortSignal }
+export interface GenerateRequest { model: ModelDefinition; messages: Message[]; tools?: ToolDefinition[]; maxOutputTokens?: number; responseFormat?: ResponseFormat; signal?: AbortSignal; /** Sampling temperature; omitted = provider default. Ignored for reasoning models, which fix their own. */ temperature?: number }
 export interface GenerateResult { text: string; toolCalls: ToolCall[]; usage: Usage }
 /**
  * `thinking` marks that the model is reasoning privately; its content is never forwarded.

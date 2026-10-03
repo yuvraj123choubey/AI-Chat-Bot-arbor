@@ -11,11 +11,13 @@ import { eventAnswerRules } from "../../../../packages/research/src/prompt.ts";
 import type { EvidenceSource } from "../../../../packages/research/src/types.ts";
 import { generateText } from "../../../../packages/ai/src/structured.ts";
 import type { App } from "../app.ts";
+import { fileEvidence, questionRefersToFiles, strongFileMatch, type FileEvidence } from "../documents-evidence.ts";
 import { ndjson, readJson, send, type RouteContext } from "../http.ts";
 import { isConversationId, titleFrom, type MessageMeta } from "../repos/conversations.ts";
 import { toSourceView } from "../repos/sources.ts";
 
-interface ChatRequest { conversationId?: string; workspace: string; message?: string; regenerate: boolean; selectedModel: string; reasoningLevel: ReasoningMode; searchMode: SearchMode }
+export type SearchScope = "auto" | "web" | "files" | "both";
+interface ChatRequest { conversationId?: string; workspace: string; message?: string; regenerate: boolean; selectedModel: string; reasoningLevel: ReasoningMode; searchMode: SearchMode; searchScope: SearchScope; documentIds: string[] }
 export function parseChat(body: any): ChatRequest | string {
   const regenerate = body?.regenerate === true;
   if (!regenerate && (typeof body?.message !== "string" || !body.message.trim() || body.message.length > 20000)) return "Message must contain 1–20,000 characters";
@@ -28,7 +30,11 @@ export function parseChat(body: any): ChatRequest | string {
   if (!["fast", "balanced", "deep"].includes(reasoningLevel)) return "Reasoning level must be fast, balanced or deep";
   const searchMode = body.searchMode ?? "auto";
   if (!["auto", "on", "off"].includes(searchMode)) return "Search must be auto, on or off";
-  return { conversationId: body.conversationId, workspace, message: regenerate ? undefined : body.message.trim(), regenerate, selectedModel, reasoningLevel, searchMode };
+  const searchScope = body.searchScope ?? "auto";
+  if (!["auto", "web", "files", "both"].includes(searchScope)) return "Search scope must be auto, web, files or both";
+  const documentIds = body.documentIds ?? [];
+  if (!Array.isArray(documentIds) || documentIds.length > 20 || documentIds.some((id: unknown) => typeof id !== "string" || !isConversationId(id))) return "documentIds must be a list of up to 20 document ids";
+  return { conversationId: body.conversationId, workspace, message: regenerate ? undefined : body.message.trim(), regenerate, selectedModel, reasoningLevel, searchMode, searchScope, documentIds: [...new Set(documentIds as string[])] };
 }
 export function parseWorkspace(value: unknown): string | undefined {
   if (value === undefined || value === null) return "default";
@@ -47,6 +53,12 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
   if (!models.length) return send(res, 503, { error: friendlyError("no_models") });
   if (input.selectedModel !== "auto" && !models.some(m => m.id === input.selectedModel)) return send(res, 400, { error: friendlyError("model_not_configured") });
   const workspaceId = await app.workspace(input.workspace);
+  if (input.documentIds.length) {
+    const docs = await app.db.document.findMany({ where: { id: { in: input.documentIds }, workspaceId }, select: { status: true, name: true } });
+    if (docs.length !== input.documentIds.length) return send(res, 400, { error: "One of the attached files was not found." });
+    const waiting = docs.find(d => d.status !== "ready");
+    if (waiting) return send(res, 409, { error: waiting.status === "failed" ? `"${waiting.name}" could not be read, so it can't be used.` : `"${waiting.name}" is still being processed. Try again in a moment.` });
+  }
 
   let conversation: { id: string; title: string; updatedAt: Date | string };
   if (input.conversationId) {
@@ -96,6 +108,25 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     // Misspelled or run-together names ("telaviv", "fly dubai") are corrected before deciding and searching.
     const normalized = input.searchMode === "off" ? { text: decision.searchText, corrections: [] } : await app.normalize(decision.searchText, stream.signal);
     const searchText = normalized.text;
+    let files: FileEvidence = { evidence: [], locators: new Map(), strongest: 0 };
+
+    /** Stores the numbered sources for this reply and sends them to the client before the answer streams. */
+    const announceSources = async (list: EvidenceSource[]) => {
+      ordinals = await app.sources.attachToMessage(workspaceId, reply.id, list);
+      sourceUrls = list.flatMap(e => [e.source.url, String(e.source.metadata.finalUrl ?? e.source.url)]);
+      const rows = await app.db.source.findMany({ where: { id: { in: [...ordinals.values()] } } });
+      const byId = new Map(rows.map(r => [r.id, toSourceView(r)]));
+      stream.write({ type: "sources", sources: list.map(e => ({ ordinal: e.ordinal, cited: false, source: byId.get(ordinals.get(e.ordinal)!), ...(e.source.metadata.locator ? { locator: e.source.metadata.locator } : {}) })) });
+    };
+    /** Grounds the answer in the user's files alone (no web search). */
+    const groundInFiles = async (): Promise<boolean> => {
+      evidence = files.evidence;
+      await announceSources(files.evidence);
+      modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, files.evidence) };
+      grounding = `${citationRules} ${fileRules}`;
+      status({ stage: "writing", label: "Writing answer" });
+      return true;
+    };
 
     /** Searches and grounds the latest turn in the results. Returns false if the client went away. */
     const runSearch = async (intent: SearchIntent): Promise<boolean> => {
@@ -108,20 +139,18 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
         if (plan.model) await app.recordUsage({ provider: plan.model.provider, model: plan.model.modelId, registryId: plan.model.id, task: "search", role: "query-planner", status: "complete", ...plan.usage, ...context });
         const gathered = await gatherEvidence({ providers: app.searchProviders }, { question: searchText, queries: plan.queries, focus: intent, depth: input.reasoningLevel, signal: stream.signal, onStatus: status });
         for (const message of gathered.notices) notice(message);
-        evidence = gathered.evidence;
+        // The user's own files come first; web sources are numbered after them, so every [n] is unambiguous.
+        const combined = [...files.evidence, ...gathered.evidence.map(e => ({ ...e, ordinal: e.ordinal + files.evidence.length }))];
+        evidence = combined;
         if (intent.event) matchedEvents = gathered.anchors ?? [];
-        ordinals = await app.sources.attachToMessage(workspaceId, reply.id, gathered.evidence);
-        sourceUrls = gathered.evidence.flatMap(e => [e.source.url, String(e.source.metadata.finalUrl ?? e.source.url)]);
-        const rows = await app.db.source.findMany({ where: { id: { in: [...ordinals.values()] } } });
-        const byId = new Map(rows.map(r => [r.id, toSourceView(r)]));
-        stream.write({ type: "sources", sources: gathered.evidence.map(e => ({ ordinal: e.ordinal, cited: false, source: byId.get(ordinals.get(e.ordinal)!) })) });
+        await announceSources(combined);
         // For a specific event, the concrete details are extracted and each one checked against its source first.
         let sheet = "";
-        if (intent.event && gathered.evidence.length) {
+        if (intent.event && combined.length) {
           status({ stage: "extracting", label: "Extracting details", detail: gathered.anchors?.length ? gathered.anchors.slice(0, 2).map(a => a.title).join(" · ") : undefined });
           try {
             // Only sources about the identified event feed extraction, so details of other events cannot leak in.
-            const about = sourcesForExtraction(gathered.evidence, gathered.anchors);
+            const about = sourcesForExtraction(combined, gathered.anchors);
             const extracted = await generateText({
               candidates: plannerCandidates(app, models, input), providers: app.providerMap, signal: stream.signal, timeoutMs: 240_000, maxOutputTokens: 1500,
               messages: extractionMessages(question, about, gathered.anchors),
@@ -137,11 +166,15 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
             status({ stage: "extracting", label: "Extracting details", detail: "skipped" });
           }
         }
-        modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, gathered.evidence, sheet) };
-        grounding = intent.event ? `${citationRules} ${eventAnswerRules}` : citationRules;
+        modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, combined, sheet) };
+        grounding = [citationRules, intent.event ? eventAnswerRules : "", files.evidence.length ? fileRules : ""].filter(Boolean).join(" ");
       } catch (error) {
         if (stream.signal.aborted) return false;
         console.warn("Search failed:", error instanceof Error ? error.message : error);
+        if (files.evidence.length) {
+          notice("Web search failed, so this answer uses only your files.");
+          return groundInFiles();
+        }
         notice("Web search failed, so this answer has no sources.");
         modelHistory[modelHistory.length - 1] = { role: "user", content: groundedUserPrompt(question, []) };
         grounding = citationRules;
@@ -171,8 +204,29 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
       throw new Error("The model stream ended without a result");
     };
 
-    const intent = searchIntent(searchText, input.searchMode);
-    if (intent.search && !(await runSearch(intent))) return stopped();
+    // The user's files: attached ones are always used; the library is used when the question refers to it or a
+    // passage matches very strongly; Scope "files"/"both" always looks, "web" never does.
+    const scope = input.searchScope;
+    const attached = input.documentIds.length > 0;
+    const explicitFiles = attached || scope === "files" || scope === "both" || questionRefersToFiles(question);
+    if (scope !== "web" && (attached || (input.searchMode !== "off" || explicitFiles) && await app.documents.readyCount(workspaceId) > 0)) {
+      if (explicitFiles) status({ stage: "reading", label: "Reading your files", detail: attached ? `${input.documentIds.length} attached` : "Your library" });
+      try { files = await fileEvidence(app, workspaceId, searchText, { documentIds: input.documentIds, signal: stream.signal }); }
+      catch (error) {
+        if (stream.signal.aborted) return stopped();
+        console.warn("File search failed:", error instanceof Error ? error.message : error);
+        if (explicitFiles) notice("Your files couldn't be searched right now.");
+      }
+      if (!explicitFiles && strongFileMatch(files)) status({ stage: "reading", label: "Reading your files", detail: "A file in your library matches this question" });
+      else if (!explicitFiles) files = { evidence: [], locators: new Map(), strongest: 0 };
+      else if (!files.evidence.length) notice("Nothing in your files matched this question.");
+    }
+    const forcedWeb = scope === "web" || scope === "both";
+    const intent = searchIntent(searchText, forcedWeb ? "on" : input.searchMode);
+    // With files in play, Auto answers from them and only adds the web when search is set to Always or Scope asks for it.
+    const useWeb = scope === "files" ? false : forcedWeb ? true : files.evidence.length ? input.searchMode === "on" : intent.search;
+    if (useWeb) { if (!(await runSearch(intent))) return stopped(); }
+    else if (files.evidence.length) await groundInFiles();
     let result = await answer();
     // An unsearched answer must not claim something doesn't exist or can't be found: check first, then answer again.
     if (!grounding && input.searchMode === "auto" && decision.mode !== "ambiguous" && result.event.type === "done" && claimsUnverifiable(result.content)) {
@@ -222,6 +276,8 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     stream.end();
   } finally { app.generating.delete(conversation.id); }
 }
+
+const fileRules = "Sources from \"Your files\" are the user's own documents: treat them as the authority on their own content, cite them like any other source, and mention the page, section or lines when that helps the user find the passage.";
 
 /** The query planner uses the cheapest suitable model, or the user's chosen model so data stays with that provider. */
 function plannerCandidates(app: App, models: ModelDefinition[], input: ChatRequest): ModelDefinition[] {

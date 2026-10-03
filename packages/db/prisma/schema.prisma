@@ -93,14 +93,15 @@ model BrowserExtensionSession {
 // ---------------------------------------------------------------- conversations
 
 model Conversation {
-  id          String          @id @default(uuid())
-  workspaceId String
-  title       String
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  workspace   Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  messages    Message[]
-  research    ResearchProject[]
+  id            String            @id @default(uuid())
+  workspaceId   String
+  title         String
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  workspace     Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  messages      Message[]
+  research      ResearchProject[]
+  documentLinks DocumentLink[]
 
   @@index([workspaceId, updatedAt])
 }
@@ -154,7 +155,7 @@ enum SourceType {
 }
 
 model Source {
-  id              String          @id @default(uuid())
+  id              String           @id @default(uuid())
   workspaceId     String
   url             String
   /// Normalised URL used to de-duplicate a source across searches.
@@ -164,19 +165,19 @@ model Source {
   author          String?
   publisher       String?
   publicationDate DateTime?
-  retrievedAt     DateTime        @default(now())
-  snippet         String          @default("")
+  retrievedAt     DateTime         @default(now())
+  snippet         String           @default("")
   fullText        String?
-  sourceType      SourceType      @default(web)
+  sourceType      SourceType       @default(web)
   searchQuery     String?
   /// Search provider, DOI, page counts and other provider-specific fields.
-  metadata        Json            @default("{}")
+  metadata        Json             @default("{}")
   /// Saved explicitly by the user (from chat, research or the extension), not just retrieved.
-  saved           Boolean         @default(false)
+  saved           Boolean          @default(false)
   documentId      String?
-  createdAt       DateTime        @default(now())
-  workspace       Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  document        Document?       @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  createdAt       DateTime         @default(now())
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  document        Document?        @relation(fields: [documentId], references: [id], onDelete: SetNull)
   messages        MessageSource[]
   citations       Citation[]
   researchSources ResearchSource[]
@@ -191,6 +192,8 @@ model MessageSource {
   ordinal   Int
   /// Excerpts the model was shown, so citations can be traced to the exact evidence.
   evidence  Json    @default("[]")
+  /// Where in an uploaded document the best excerpt is: { page?, section?, lines?: [from, to] }.
+  locator   Json?
   cited     Boolean @default(false)
   message   Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
   source    Source  @relation(fields: [sourceId], references: [id], onDelete: Cascade)
@@ -245,6 +248,7 @@ model ResearchProject {
   sources        ResearchSource[]
   notes          ResearchNote[]
   citations      Citation[]
+  documentLinks  DocumentLink[]
 }
 
 model ResearchSource {
@@ -282,23 +286,23 @@ enum TaskStatus {
 }
 
 model Task {
-  id           String           @id @default(uuid())
+  id           String            @id @default(uuid())
   workspaceId  String
   userId       String?
   parentTaskId String?
   type         String
-  status       TaskStatus       @default(queued)
+  status       TaskStatus        @default(queued)
   title        String
-  input        Json             @default("{}")
+  input        Json              @default("{}")
   output       Json?
   error        String?
-  createdAt    DateTime         @default(now())
+  createdAt    DateTime          @default(now())
   startedAt    DateTime?
   finishedAt   DateTime?
-  workspace    Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  user         User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
-  parent       Task?            @relation("Subtasks", fields: [parentTaskId], references: [id], onDelete: Cascade)
-  subtasks     Task[]           @relation("Subtasks")
+  workspace    Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user         User?             @relation(fields: [userId], references: [id], onDelete: SetNull)
+  parent       Task?             @relation("Subtasks", fields: [parentTaskId], references: [id], onDelete: Cascade)
+  subtasks     Task[]            @relation("Subtasks")
   steps        TaskStep[]
   agentRuns    AgentRun[]
   research     ResearchProject?
@@ -343,19 +347,19 @@ model AgentRun {
 }
 
 model ToolCall {
-  id         String    @id @default(uuid())
+  id         String   @id @default(uuid())
   agentRunId String
   tool       String
-  input      Json      @default("{}")
+  input      Json     @default("{}")
   output     Json?
-  status     String    @default("ok")
+  status     String   @default("ok")
   error      String?
-  createdAt  DateTime  @default(now())
-  agentRun   AgentRun  @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  agentRun   AgentRun @relation(fields: [agentRunId], references: [id], onDelete: Cascade)
 }
 
 model UsageEvent {
-  id             String    @id @default(uuid())
+  id             String     @id @default(uuid())
   workspaceId    String?
   conversationId String?
   taskId         String?
@@ -365,10 +369,10 @@ model UsageEvent {
   task           String?
   role           String?
   status         String
-  inputTokens    Int       @default(0)
-  outputTokens   Int       @default(0)
+  inputTokens    Int        @default(0)
+  outputTokens   Int        @default(0)
   costUsd        Float?
-  createdAt      DateTime  @default(now())
+  createdAt      DateTime   @default(now())
   workspace      Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, createdAt])
@@ -382,6 +386,31 @@ enum DocumentKind {
   assignment_instructions
   rubric
   lecture
+  starter_code
+  screenshot
+}
+
+/// Attaches a file to something that uses it. Exactly one target is set; `role` says what the file is for there
+/// (for assignments: instructions, rubric, lecture, starter_code, screenshot, reference).
+model DocumentLink {
+  id                String           @id @default(uuid())
+  documentId        String
+  conversationId    String?
+  researchProjectId String?
+  assignmentId      String?
+  projectId         String?
+  role              String?
+  createdAt         DateTime         @default(now())
+  document          Document         @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  conversation      Conversation?    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  researchProject   ResearchProject? @relation(fields: [researchProjectId], references: [id], onDelete: Cascade)
+  assignment        Assignment?      @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  project           Project?         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, conversationId])
+  @@unique([documentId, researchProjectId])
+  @@unique([documentId, assignmentId])
+  @@unique([documentId, projectId])
 }
 
 enum DocumentStatus {
@@ -391,42 +420,48 @@ enum DocumentStatus {
 }
 
 model Document {
-  id           String          @id @default(uuid())
+  id           String                  @id @default(uuid())
   workspaceId  String
   courseId     String?
   assignmentId String?
-  kind         DocumentKind    @default(upload)
+  kind         DocumentKind            @default(upload)
   name         String
+  /// Optional name chosen by the user; `name` keeps the original file name.
+  displayName  String?
   mimeType     String
   sizeBytes    Int
   sha256       String
   /// Path of the stored original, relative to the server's storage root.
   storagePath  String
   pageCount    Int?
-  status       DocumentStatus  @default(processing)
+  status       DocumentStatus          @default(processing)
   error        String?
-  createdAt    DateTime        @default(now())
-  workspace    Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  course       Course?         @relation(fields: [courseId], references: [id], onDelete: SetNull)
-  assignment   Assignment?     @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  createdAt    DateTime                @default(now())
+  workspace    Workspace               @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  course       Course?                 @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  assignment   Assignment?             @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   chunks       DocumentChunk[]
   sources      Source[]
   requirements AssignmentRequirement[]
+  links        DocumentLink[]
 
   @@unique([workspaceId, sha256])
 }
 
 model DocumentChunk {
-  id          String   @id @default(uuid())
-  documentId  String
-  ordinal     Int
-  text        String
-  page        Int?
-  section     String?
+  id         String   @id @default(uuid())
+  documentId String
+  ordinal    Int
+  text       String
+  page       Int?
+  section    String?
+  /// First and last line of the chunk, for source code and plain text.
+  lineStart  Int?
+  lineEnd    Int?
   /// Embedding vector; similarity is computed by the retrieval layer (swap for pgvector when available).
-  embedding   Float[]
-  tokenCount  Int      @default(0)
-  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  embedding  Float[]
+  tokenCount Int      @default(0)
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@unique([documentId, ordinal])
 }
@@ -454,17 +489,22 @@ enum AssignmentStatus {
 }
 
 model Assignment {
-  id           String                  @id @default(uuid())
-  courseId     String
-  title        String
-  dueAt        DateTime?
-  status       AssignmentStatus        @default(not_started)
-  notes        String?
-  createdAt    DateTime                @default(now())
-  updatedAt    DateTime                @updatedAt
-  course       Course                  @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  documents    Document[]
-  requirements AssignmentRequirement[]
+  id            String                  @id @default(uuid())
+  courseId      String
+  title         String
+  dueAt         DateTime?
+  status        AssignmentStatus        @default(not_started)
+  notes         String?
+  description   String?
+  /// When requirements were last extracted from the attached instructions/rubric, and last checked against a submission.
+  extractedAt   DateTime?
+  checkedAt     DateTime?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+  course        Course                  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  documents     Document[]
+  requirements  AssignmentRequirement[]
+  documentLinks DocumentLink[]
 }
 
 enum RequirementKind {
@@ -492,9 +532,14 @@ model AssignmentRequirement {
   quote        String
   documentId   String
   page         Int?
+  section      String?
   points       Float?
   status       RequirementStatus @default(todo)
   ordinal      Int
+  /// Result of the last submission check: met | partial | missing | unclear, with a note and the submission's own words.
+  checkStatus  String?
+  checkNote    String?
+  checkQuote   String?
   assignment   Assignment        @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
   document     Document          @relation(fields: [documentId], references: [id], onDelete: Cascade)
 }
@@ -502,17 +547,18 @@ model AssignmentRequirement {
 // ---------------------------------------------------------------- code workspace
 
 model Project {
-  id          String           @id @default(uuid())
-  workspaceId String
-  name        String
+  id            String           @id @default(uuid())
+  workspaceId   String
+  name          String
   /// Directory on the server that holds the project's working files.
-  rootPath    String
-  template    String?
-  createdAt   DateTime         @default(now())
-  workspace   Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  files       ProjectFile[]
-  versions    ProjectVersion[]
-  artifacts   Artifact[]
+  rootPath      String
+  template      String?
+  createdAt     DateTime         @default(now())
+  workspace     Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  files         ProjectFile[]
+  versions      ProjectVersion[]
+  artifacts     Artifact[]
+  documentLinks DocumentLink[]
 }
 
 model ProjectFile {

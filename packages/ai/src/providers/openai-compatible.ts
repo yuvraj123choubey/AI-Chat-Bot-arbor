@@ -14,6 +14,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
       model: request.model.modelId,
       messages: request.messages,
       ...(request.maxOutputTokens ? { [this.maxTokensField]: request.maxOutputTokens } : {}),
+      ...(request.temperature !== undefined && !request.model.supportsReasoning ? { temperature: request.temperature } : {}),
       ...(format && this.jsonMode === "schema" ? { response_format: { type: "json_schema", json_schema: { name: format.name, schema: format.schema, strict: false } } } : {}),
       ...(format && this.jsonMode === "object" ? { response_format: { type: "json_object" } } : {}),
       ...(request.tools?.length ? { tools: request.tools.map(t => ({ type: "function", function: t })) } : {}),

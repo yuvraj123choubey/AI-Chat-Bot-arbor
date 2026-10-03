@@ -26,7 +26,9 @@ export class SourceRepo {
     const data = {
       url: source.url, title: source.title.slice(0, 500), domain: source.domain, author: source.author?.slice(0, 300) ?? null, publisher: source.publisher?.slice(0, 300) ?? null,
       publicationDate: validDate(source.publishedAt), retrievedAt: new Date(), snippet: source.snippet.slice(0, 2000), fullText: source.fullText.slice(0, 200_000),
-      sourceType: source.sourceType, searchQuery: source.searchQuery?.slice(0, 500) ?? null, metadata: { ...source.metadata, readMode: source.readMode } as Prisma.InputJsonValue
+      sourceType: source.sourceType, searchQuery: source.searchQuery?.slice(0, 500) ?? null, metadata: { ...source.metadata, readMode: source.readMode } as Prisma.InputJsonValue,
+      // Uploaded-file sources point back at their document, so deleting the document removes them.
+      documentId: typeof source.metadata.documentId === "string" ? source.metadata.documentId : null
     };
     const row = await this.db.source.upsert({
       where: { workspaceId_canonicalUrl: { workspaceId, canonicalUrl: source.canonicalUrl } },
@@ -39,7 +41,10 @@ export class SourceRepo {
     const ids = new Map<number, string>();
     for (const e of evidence) ids.set(e.ordinal, await this.upsert(workspaceId, e.source));
     await this.db.messageSource.createMany({
-      data: evidence.map(e => ({ messageId, sourceId: ids.get(e.ordinal)!, ordinal: e.ordinal, evidence: e.passages.map(p => ({ text: p.text, start: p.start })) as Prisma.InputJsonValue })),
+      data: evidence.map(e => ({
+        messageId, sourceId: ids.get(e.ordinal)!, ordinal: e.ordinal, evidence: e.passages.map(p => ({ text: p.text, start: p.start })) as Prisma.InputJsonValue,
+        locator: (e.source.metadata.locator ?? undefined) as Prisma.InputJsonValue | undefined
+      })),
       skipDuplicates: true
     });
     return ids;

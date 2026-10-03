@@ -1,22 +1,31 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ndjsonEvents, WORKSPACE, type ChatMessage, type Level, type Model, type SearchMode, type Summary } from "./api.ts";
+import { api, ndjsonEvents, WORKSPACE, type ChatMessage, type Level, type Model, type SearchMode, type SearchScope, type Summary } from "./api.ts";
 import { AnswerCard } from "./components/Answer.tsx";
 import { Background } from "./components/Background.tsx";
 import { Composer } from "./components/Composer.tsx";
 import { DeepResearch } from "./components/DeepResearch.tsx";
-import { BookIcon, ChatIcon, CodeIcon, CompassIcon, GridIcon, LogoIcon, MenuIcon, PlusIcon, SearchIcon, SparkIcon } from "./components/Icons.tsx";
+import { BookIcon, ChatIcon, CodeIcon, CompassIcon, FileIcon, GridIcon, LogoIcon, MenuIcon, PlusIcon, SearchIcon, SparkIcon } from "./components/Icons.tsx";
 import { SourceLibrary, SourcesPanel } from "./components/Sources.tsx";
+import { useUploads } from "./components/Files.tsx";
+import { FileLibrary } from "./components/FileLibraryView.tsx";
+import { PreviewHost } from "./components/DocumentPreview.tsx";
+import { Assignments } from "./components/Assignments.tsx";
+// The editor (CodeMirror) is only downloaded when the Code Workspace is opened.
+const CodeWorkspace = React.lazy(() => import("./components/CodeWorkspace.tsx").then(m => ({ default: m.CodeWorkspace })));
 import "./style.css";
 
-type View = "chat" | "research" | "sources";
+type View = "chat" | "research" | "sources" | "files" | "code" | "assignments";
+const VIEWS: View[] = ["chat", "research", "sources", "files", "code", "assignments"];
 const VERSION = "v0.3";
 const stored = (key: string, fallback: string) => { try { return localStorage.getItem(key) || fallback; } catch { return fallback; } };
 const remember = (key: string, value: string) => { try { localStorage.setItem(key, value); } catch { /* preferences are optional */ } };
 const searchWord: Record<SearchMode, string> = { auto: "auto", on: "always", off: "off" };
 
 function App() {
-  const [view, setView] = useState<View>("chat");
+  // The current view survives a reload, so work in the Code Workspace is not interrupted by a refresh.
+  const [view, setView] = useState<View>(() => { const v = stored("arbor.view", "chat") as View; return VIEWS.includes(v) ? v : "chat"; });
+  const [codeOpen, setCodeOpen] = useState<{ projectId?: string; context?: string }>({});
   const [drawer, setDrawer] = useState(false);
   const [models, setModels] = useState<Model[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -24,6 +33,7 @@ function App() {
   const [mode, setMode] = useState<Level>(() => stored("arbor.level", "balanced") as Level);
   const [choice, setChoice] = useState(() => stored("arbor.model", "auto"));
   const [searchMode, setSearchMode] = useState<SearchMode>(() => stored("arbor.search", "auto") as SearchMode);
+  const [scope, setScope] = useState<SearchScope>(() => stored("arbor.scope", "auto") as SearchScope);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -33,6 +43,7 @@ function App() {
   const [panel, setPanel] = useState<{ messageId: string; ordinal?: number } | null>(null);
   const [researchPanel, setResearchPanel] = useState(false);
   const [lastReplyMs, setLastReplyMs] = useState<number | undefined>();
+  const attachments = useUploads();
   const controller = useRef<AbortController | null>(null);
   const pending = useRef("");
   const frame = useRef(0);
@@ -50,8 +61,10 @@ function App() {
     loadHistory();
   }, [loadHistory]);
   useEffect(() => remember("arbor.level", mode), [mode]);
+  useEffect(() => remember("arbor.view", view), [view]);
   useEffect(() => remember("arbor.model", choice), [choice]);
   useEffect(() => remember("arbor.search", searchMode), [searchMode]);
+  useEffect(() => remember("arbor.scope", scope), [scope]);
   useEffect(() => {
     const onScroll = () => { followBottom.current = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 220; };
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -83,10 +96,14 @@ function App() {
     const started = performance.now();
     let sawText = false;
     const placeholder: ChatMessage = { id: `pending-${Date.now()}`, role: "assistant", content: "", status: "streaming" };
+    // Files attached to this message are always searched for it; the chips are cleared once it is sent.
+    const attached = options.regenerate ? [] : attachments.uploads.filter(u => u.state === "ready" && u.document);
+    const documentIds = attached.map(u => u.document!.id);
+    if (!options.regenerate) attachments.clear();
     if (options.regenerate) {
       setMessages(prior => { const kept = [...prior]; while (kept.at(-1)?.role === "assistant") kept.pop(); return [...kept, placeholder]; });
     } else {
-      setMessages(prior => [...prior, { id: `user-${Date.now()}`, role: "user", content: text }, placeholder]);
+      setMessages(prior => [...prior, { id: `user-${Date.now()}`, role: "user", content: text, attachments: attached.map(u => u.name) }, placeholder]);
       setPrompt("");
     }
     const abort = new AbortController();
@@ -95,7 +112,7 @@ function App() {
     try {
       const response = await fetch("/api/chat", {
         method: "POST", headers: { "content-type": "application/json" }, signal: abort.signal,
-        body: JSON.stringify({ conversationId: conversationId || undefined, workspaceId: WORKSPACE, message: options.regenerate ? undefined : text, regenerate: options.regenerate || undefined, selectedModel: choice, reasoningLevel: mode, searchMode })
+        body: JSON.stringify({ conversationId: conversationId || undefined, workspaceId: WORKSPACE, message: options.regenerate ? undefined : text, regenerate: options.regenerate || undefined, selectedModel: choice, reasoningLevel: mode, searchMode, searchScope: scope, ...(documentIds.length ? { documentIds } : {}) })
       });
       if (!response.ok || !response.body) {
         const data = await response.json().catch(() => ({}));
@@ -165,13 +182,14 @@ function App() {
   const status = !modelsLoaded ? "Connecting…" : models.length ? `${providerNames.join(" + ")} · ${models.length} model${models.length === 1 ? "" : "s"} ready` : "No model connected";
   const starters = [
     { icon: <SearchIcon size={16} />, badge: "Cited", title: "Research a topic", note: "Plans, searches and writes a cited report", run: () => go("research") },
-    { icon: <CodeIcon size={16} />, badge: "Code", title: "Work through code", note: "Debug, explain or review code", run: () => setPrompt("Help me debug this code. Here's what it should do and what happens instead:\n\n") },
+    { icon: <CodeIcon size={16} />, badge: "Code", title: "Work through code", note: "Projects, editor, terminal and a coding agent", run: () => go("code") },
     { icon: <SparkIcon size={16} />, badge: "Deep", title: "Solve hard logic", note: "Step-by-step reasoning", run: () => { setMode("deep"); setPrompt("Work through this problem step by step: "); } },
-    { icon: <GridIcon size={16} />, badge: "Plan", title: "Plan an assignment", note: "Break work into steps", run: () => setPrompt("Help me break this assignment into research, writing, testing and a final check against the rubric: ") }
+    { icon: <GridIcon size={16} />, badge: "Plan", title: "Plan an assignment", note: "Instructions, rubric, progress and a submission check", run: () => go("assignments") }
   ];
 
-  return <div className={`app${panelOpen ? " with-panel" : ""}${view === "chat" ? " has-dock" : ""}`}>
+  return <div className={`app${panelOpen ? " with-panel" : ""}${view === "chat" ? " has-dock" : ""}${view === "code" ? " wide" : ""}`}>
     <Background />
+    <PreviewHost />
     <header className="topbar">
       <button type="button" className="icon-button menu-toggle" onClick={() => setDrawer(d => !d)} aria-label="Menu" aria-expanded={drawer}><MenuIcon size={17} /></button>
       <button type="button" className="brand" onClick={newConversation} aria-label="Arbor home">
@@ -193,8 +211,9 @@ function App() {
         <button type="button" className={`nav-item${view === "chat" ? " active" : ""}`} onClick={() => go("chat")}><ChatIcon size={15} /> Ask Arbor</button>
         <button type="button" className={`nav-item${view === "research" ? " active" : ""}`} onClick={() => go("research")} disabled={streaming}><CompassIcon size={15} /> Deep research</button>
         <button type="button" className={`nav-item${view === "sources" ? " active" : ""}`} onClick={() => go("sources")} disabled={streaming}><BookIcon size={15} /> Sources</button>
-        <div className="nav-item muted"><GridIcon size={15} /> Assignments <small>soon</small></div>
-        <div className="nav-item muted"><CodeIcon size={15} /> Code workspace <small>soon</small></div>
+        <button type="button" className={`nav-item${view === "files" ? " active" : ""}`} onClick={() => go("files")} disabled={streaming}><FileIcon size={15} /> Files</button>
+        <button type="button" className={`nav-item${view === "assignments" ? " active" : ""}`} onClick={() => go("assignments")} disabled={streaming}><GridIcon size={15} /> Assignments</button>
+        <button type="button" className={`nav-item${view === "code" ? " active" : ""}`} onClick={() => go("code")} disabled={streaming}><CodeIcon size={15} /> Code workspace</button>
         {history.length > 0 && <>
           <div className="nav-label">Recent</div>
           <nav className="history">{history.slice(0, 30).map(c => <button key={c.id} className={`history-item${c.id === conversationId && view === "chat" ? " current" : ""}`} onClick={() => open(c.id)} disabled={streaming} title={c.title}>{c.title}</button>)}</nav>
@@ -204,7 +223,7 @@ function App() {
       {drawer && <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden="true" />}
 
       <main className="main">
-        {view === "sources" ? <SourceLibrary /> : view === "research" ? <DeepResearch models={models} onPanelChange={setResearchPanel} /> : <>
+        {view === "sources" ? <SourceLibrary /> : view === "files" ? <FileLibrary /> : view === "assignments" ? <Assignments onOpenCode={(projectId, context) => { setCodeOpen({ projectId, context }); go("code"); }} /> : view === "code" ? <React.Suspense fallback={<p className="thinking">Loading the Code Workspace…</p>}><CodeWorkspace models={models} openProjectId={codeOpen.projectId} context={codeOpen.context} onConsumeOpen={() => setCodeOpen(o => ({ context: o.context }))} /></React.Suspense> : view === "research" ? <DeepResearch models={models} onPanelChange={setResearchPanel} /> : <>
           {!messages.length && <>
             <section className="hero">
               <div className="hero-meta">
@@ -224,7 +243,7 @@ function App() {
           {messages.length > 0 && <div className="thread" aria-live="polite">
             {title && <div className="thread-title">{title}</div>}
             {messages.map((m, i) => m.role === "user"
-              ? <div key={m.id} className="msg-user">{m.content}</div>
+              ? <div key={m.id} className="msg-user">{m.attachments?.length ? <div className="msg-files">{m.attachments.map(name => <span key={name}><FileIcon size={11} /> {name}</span>)}</div> : null}{m.content}</div>
               : <AnswerCard key={m.id} message={m} isLast={i === lastAssistant} canRegenerate={Boolean(conversationId) && models.length > 0} streaming={streaming}
                   onRegenerate={() => send({ regenerate: true })} onOpenSources={ordinal => openSources(m.id, ordinal)} />)}
             <div ref={endRef} />
@@ -238,7 +257,8 @@ function App() {
     {view === "chat" && <div className="dock">
       <Composer value={prompt} onChange={setPrompt} onSend={() => send()} onStop={stop} streaming={streaming} disabled={!models.length}
         placeholder={messages.length ? "Ask a follow-up…" : "Ask anything, untangle a problem, or start a project…"}
-        models={models} choice={choice} onChoice={setChoice} level={mode} onLevel={setMode} search={searchMode} onSearch={setSearchMode} onDeepResearch={() => go("research")} />
+        models={models} choice={choice} onChoice={setChoice} level={mode} onLevel={setMode} search={searchMode} onSearch={setSearchMode} onDeepResearch={() => go("research")}
+        scope={scope} onScope={setScope} uploads={attachments.uploads} onAttach={attachments.add} onRemoveUpload={attachments.remove} />
       <div className="hint">Enter to send · Shift + Enter for a new line</div>
     </div>}
     {view === "chat" && panelMessage?.sources?.length ? <SourcesPanel sources={panelMessage.sources} active={panel?.ordinal} onClose={() => setPanel(null)} /> : null}

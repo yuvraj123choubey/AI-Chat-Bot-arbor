@@ -10,6 +10,7 @@ import { createApp, type App } from "../src/app.ts";
 import { createHttpServer } from "../src/http-server.ts";
 import type { AIProvider, GenerateRequest, ModelDefinition, StreamChunk } from "../../../packages/ai/src/types.ts";
 import type { SearchProvider } from "../../../packages/research/src/types.ts";
+import { fakeEmbedder, makePdf } from "../../../packages/files/test/fixtures.ts";
 
 const model: ModelDefinition = { id: "stub-general", provider: "openai", modelId: "stub-1", displayName: "Stub", capabilities: ["fast", "reasoning"], supportsStreaming: true, supportsTools: false, supportsVision: false, supportsReasoning: true, supportsCoding: true, contextWindow: 0, inputUsdPerMillion: 1, outputUsdPerMillion: 2, enabled: true };
 
@@ -91,7 +92,7 @@ before(async () => {
     messages: [{ id: "22222222-2222-4222-8222-222222222222", role: "user", content: "old question", createdAt: "2026-01-01T00:00:00Z" },
       { id: "33333333-3333-4333-8333-333333333333", role: "assistant", content: "old answer", createdAt: "2026-01-01T00:00:01Z", status: "complete" }]
   }));
-  app = await createApp({ db: testDb.db, providers: [provider], registry: [model], searchProviders: [official, search], dataRoot: testDb.dataRoot, normalize: async text => ({ text, corrections: [] }) });
+  app = await createApp({ db: testDb.db, providers: [provider], registry: [model], searchProviders: [official, search], dataRoot: testDb.dataRoot, normalize: async text => ({ text, corrections: [] }), embedder: fakeEmbedder() });
   server = createHttpServer(app).listen(0, "127.0.0.1");
   await new Promise(r => server.once("listening", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -244,9 +245,12 @@ test("deep research runs as a task: live events, stored plan, numbered sources, 
   assert.deepEqual(research.steps.map((s: any) => [s.kind, s.status]), [["plan", "completed"], ["search", "completed"], ["notes", "completed"], ["gaps", "completed"], ["report", "completed"]]);
   assert.ok(await app.db.agentRun.count({ where: { taskId } }) >= 3);
   assert.ok((await get("/api/research")).some((r: any) => r.id === researchId));
-  // A finished task's event stream returns the snapshot and ends.
+  // A finished task's event stream returns the snapshot, replays the events it kept, and ends.
   const replay = await followTask(taskId);
-  assert.deepEqual(replay.map(e => e.type), ["snapshot"]);
+  assert.equal(replay[0].type, "snapshot");
+  assert.equal(replay[0].status, "completed");
+  assert.deepEqual(replay.slice(1).map(e => e.type), events.slice(1).map(e => e.type));
+  assert.equal(replay.at(-1).status, "completed");
 });
 
 test("deep research can be cancelled and deleted", async () => {
@@ -319,4 +323,73 @@ test("regression: an unsearched 'does not exist' answer triggers a search and is
   assert.ok(types.indexOf("reset") > types.indexOf("delta"), "the first draft streamed, then was reset");
   assert.ok(types.indexOf("sources") > types.indexOf("reset"), "search ran after the reset");
   assert.doesNotMatch(events.find(e => e.type === "done").content ?? "", /does not exist/);
+});
+
+// ----------------------------------------------------------------- files: upload, ingest, cite
+const upload = (name: string, bytes: Buffer, headers: Record<string, string> = { "x-arbor-client": "web" }) => {
+  const form = new FormData();
+  form.append("file", new Blob([new Uint8Array(bytes)]), name);
+  return fetch(`${base}/api/documents`, { method: "POST", body: form, headers });
+};
+const searchCalls = () => officialQuestions.length;
+
+test("files: uploads are guarded, ingested in the background, de-duplicated and served safely", async () => {
+  assert.equal((await upload("a.pdf", makePdf(["x"]), {})).status, 403, "uploads need the app header");
+  assert.equal((await upload("tool.exe", Buffer.from("MZ binary"))).status, 415);
+  const pdf = makePdf(["Offline backups stop ransomware from destroying data.", "Patching vulnerabilities closes the initial access route."]);
+  const created = await upload("security-notes.pdf", pdf);
+  assert.equal(created.status, 202);
+  const { document, taskId } = await created.json();
+  assert.equal(document.status, "processing");
+  const events = await followTask(taskId);
+  assert.equal(events.at(-1).status, "completed");
+  assert.ok(events.some(e => e.type === "progress" && e.stage === "embedding"));
+  const ready = await get(`/api/documents/${document.id}`);
+  assert.deepEqual([ready.status, ready.pageCount, ready.chunkCount > 0], ["ready", 2, true]);
+  const again = await upload("copy.pdf", pdf);
+  assert.equal(again.status, 200);
+  assert.equal((await again.json()).taskId, null, "identical content is not stored twice");
+  const file = await fetch(`${base}/api/documents/${document.id}/file`);
+  assert.equal(file.headers.get("content-type"), "application/pdf");
+  assert.match(file.headers.get("content-security-policy")!, /sandbox/);
+  assert.deepEqual(Buffer.from(await file.arrayBuffer()), pdf);
+  assert.ok((await get("/api/documents")).some((d: any) => d.id === document.id));
+});
+
+test("files: attached documents ground the answer with page locators, without a web search", async () => {
+  const doc = (await get("/api/documents")).find((d: any) => d.name === "security-notes.pdf");
+  const before = searchCalls();
+  const { events, conversationId } = await chat({ message: "What closes the initial access route?", documentIds: [doc.id] });
+  assert.equal(searchCalls(), before, "attached files answer the question without a web search");
+  const sources = events.find(e => e.type === "sources").sources;
+  assert.equal(sources[0].source.sourceType, "uploaded_file");
+  assert.equal(sources[0].source.url, `/api/documents/${doc.id}/file`);
+  assert.equal(sources[0].locator.page, 2);
+  assert.match(lastAnswerRequest().messages.at(-1)!.content, /\(page 2\) Patching vulnerabilities/);
+  const reply = (await get(`/api/conversations/${conversationId}`)).messages[1];
+  assert.equal(reply.sources[0].locator.page, 2);
+});
+
+test("files: the library is used when the question refers to it; Scope 'files' never searches the web", async () => {
+  const { events } = await chat({ message: "What do my notes say about offline backups?" });
+  assert.equal(events.find(e => e.type === "sources")?.sources[0].source.sourceType, "uploaded_file");
+  const before = searchCalls();
+  const scoped = await chat({ message: "course description cpre 4300 iowa state", searchScope: "files" });
+  assert.equal(searchCalls(), before, "no web search with Scope 'files'");
+  assert.ok(scoped.events.some(e => e.type === "notice" && /Nothing in your files matched/.test(e.message)));
+  const unrelated = await chat({ message: "hello there", searchMode: "off" });
+  assert.ok(!unrelated.events.some(e => e.type === "sources"), "an unrelated chat does not pull in files");
+});
+
+test("files: processing or missing files are refused; deleting removes the file and its sources", async () => {
+  const workspaceId = (await app.db.workspace.findUnique({ where: { slug: "default" } }))!.id;
+  const pending = await app.db.document.create({ data: { workspaceId, name: "big.pdf", mimeType: "application/pdf", sizeBytes: 1, sha256: "f".repeat(64), storagePath: "none.pdf", status: "processing" } });
+  const busy = await chat({ message: "summarise it", documentIds: [pending.id] });
+  assert.equal(busy.status, 409);
+  assert.match(busy.error, /still being processed/);
+  assert.equal((await chat({ message: "x", documentIds: ["00000000-0000-4000-8000-000000000000"] })).status, 400);
+  const doc = (await get("/api/documents")).find((d: any) => d.name === "security-notes.pdf");
+  assert.equal((await fetch(`${base}/api/documents/${doc.id}`, { method: "DELETE" })).status, 200);
+  assert.equal((await fetch(`${base}/api/documents/${doc.id}`)).status, 404);
+  assert.equal(await app.db.source.count({ where: { documentId: doc.id } }), 0);
 });

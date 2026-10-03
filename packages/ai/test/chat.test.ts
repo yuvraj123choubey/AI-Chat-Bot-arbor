@@ -159,8 +159,14 @@ test("DeepSeek streams answer text only, never its private reasoning", async () 
 
 test("OpenAI uses max_completion_tokens and surfaces HTTP errors as typed provider errors", async () => {
   await withFetch(sse(['data: {"choices":[{"delta":{"content":"ok"}}]}']), async requests => {
-    await chunks(new OpenAIProvider("key").stream({ model: general, messages: [], maxOutputTokens: 50 }));
+    await chunks(new OpenAIProvider("key").stream({ model: general, messages: [], maxOutputTokens: 50, temperature: 0.1 }));
     assert.equal(JSON.parse(String(requests[0].init.body)).max_completion_tokens, 50);
+    assert.equal(JSON.parse(String(requests[0].init.body)).temperature, 0.1);
+  });
+  // Reasoning models fix their own sampling; a requested temperature is not sent to them.
+  await withFetch(sse(['data: {"choices":[{"delta":{"content":"ok"}}]}']), async requests => {
+    await chunks(new OpenAIProvider("key").stream({ model: { ...general, supportsReasoning: true }, messages: [], temperature: 0.1 }));
+    assert.equal("temperature" in JSON.parse(String(requests[0].init.body)), false);
   });
   await withFetch(new Response('{"error":{"message":"bad key"}}', { status: 401 }), async () => {
     await assert.rejects(chunks(new OpenAIProvider("key").stream({ model: general, messages: [] })), (e: ProviderError) => e.code === "auth");

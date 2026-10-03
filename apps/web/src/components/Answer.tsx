@@ -68,7 +68,9 @@ export function AnswerCard({ message, isLast, canRegenerate, streaming, onRegene
     {grounded.length > 0 && <div className="grounded">
       <span className="grounded-label">Grounded in</span>
       {grounded.slice(0, 5).map(s => <button key={s.ordinal} type="button" className={`ground-chip${s.cited ? "" : " uncited"}`} onClick={() => onOpenSources(s.ordinal)} title={s.source.title}>
-        <span className="ground-num">{s.ordinal}</span><span className="ground-text">{s.source.domain === "doi.org" && s.source.publisher ? s.source.publisher : s.source.domain}</span>
+        <span className="ground-num">{s.ordinal}</span><span className="ground-text">{s.source.sourceType === "uploaded_file"
+          ? `${s.source.title}${s.locator?.page ? ` · p. ${s.locator.page}` : s.locator?.lines ? ` · L${s.locator.lines[0]}` : ""}`
+          : s.source.domain === "doi.org" && s.source.publisher ? s.source.publisher : s.source.domain}</span>
       </button>)}
       {grounded.length > 5 && <button type="button" className="ground-chip" onClick={() => onOpenSources()}>+{grounded.length - 5}</button>}
     </div>}

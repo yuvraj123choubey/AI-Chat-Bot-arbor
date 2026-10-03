@@ -2,6 +2,40 @@
 
 Newest first. Each entry: what changed, how it was verified, what is still open.
 
+## 2026-10-03 — Files, document preview, Code Workspace and coding agent
+
+**Built**
+- Files: library page (upload/drag-drop, search, kind/status filters, rename, attach to assignments, projects,
+  research and conversations, delete), upload states, parsing (PDF pages, DOCX, text/code lines, images without
+  OCR), chunking with page/line locators, local embeddings, Ask Arbor scope (Auto, Web, Files, Web + Files),
+  file citations that open an in-app preview at the cited page or lines (page nav, zoom, find, code highlighting).
+- Code Workspace: projects from templates, file explorer, CodeMirror editor, safe terminal with live output and
+  Stop, run tests/build, live preview (static and dev-server), version history with diffs and restore.
+- Coding agent: inspect → plan → edit → run → observe → fix → retest with structured tools, compact task memory,
+  working set, repo index (symbols, imports, relevant files), baseline checks, patch-based edits (whitespace- and
+  quote-tolerant, all-or-nothing) and whole-file rewrites for small files, loop guards, and finish gates (checks
+  it broke, unreproduced bug reports, console errors on edited pages, no-change finishes). One revertible
+  checkpoint per task; metrics per run.
+- Assignments UI (courses, assignments, role-tagged uploads, requirement extraction, progress, submission check,
+  hand-off to the Code Workspace) against the assignments API contract; shows an honest notice while that
+  service is not running.
+- `npm run eval:agent`: six-task evaluation with hidden checkers and per-task logs and action traces.
+
+**Verified**
+- Typecheck, lint, production build; full test suite green.
+- Real-browser runs (installed Chrome via playwright-core): PDF upload → Ready with page count, preview with pages
+  and find, rename, file-grounded answer citing "p. 2" that opens the preview at page 2; project creation, edit
+  and Ctrl+S, terminal run / refused shell operators / Stop, live preview with a working script, save version,
+  diff, restore; the agent changing a heading with the local model, viewing its diff and reverting it.
+
+**Fixed along the way**
+- Task event streams ended right after the snapshot when the task had already finished, dropping its events.
+- The agent could finish a static-site edit that threw a syntax error (no checks to catch it).
+
+**Open**
+- Agent quality is bounded by the local model; see the eval numbers in the milestone report.
+- Assignments backend is not part of this milestone. ZIP starter code and OCR are not supported.
+
 ## 2026-10-02 — Free-only stack, local model, web search with citations, PostgreSQL
 
 **Built**
