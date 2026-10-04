@@ -32,8 +32,8 @@ class StubProvider implements AIProvider {
       }
       case "research_gaps": return reply(JSON.stringify({ missing: [], conflicts: [] }));
     }
-    if (request.messages[0].content.startsWith("You check ONE requirement")) {
-      return reply(/REQUIREMENT \(Task 1/.test(user) ? "MET | Explains the status output | \"it shows Status: active\"" : "MISSING | Not done | \"\"");
+    if (request.messages[0].content.startsWith("You check a student's submission")) {
+      return reply(/TASK \(Task 1/.test(user) ? "P1: YES | \"it shows Status: active\"" : "P1: NO | not done");
     }
     if (request.messages[0].content.startsWith("You write research reports")) return reply("## Summary\nOffline backups allow recovery [1]. Made-up claim [8].");
     if (request.messages[0].content.startsWith("You take research notes")) return reply(`- Offline backups allow recovery without paying. [${Number(user.match(/^\[(\d+)\]/m)?.[1] ?? 1)}]`);
@@ -418,7 +418,11 @@ test("study: 'is my submission complete?' checks each requirement; follow-ups ke
   assert.deepEqual(stored.messages[0].attachments, ["lab5.md", "submission.md"]);
   // Asking about a task that does not exist is answered honestly.
   const missing = await chat({ conversationId: review.conversationId, message: "What does task 9 say?" });
-  assert.match(missing.events.find(e => e.type === "done").content ?? "", /I couldn't find task 9 in your files/);
+  const missingText = missing.events.find(e => e.type === "done").content ?? missing.events.filter(e => e.type === "delta").map(e => e.text).join("");
+  assert.match(missingText, /^There is no Task 9 in lab5\.md, submission\.md — lab5\.md has Task 1, Task 2/);
+  // A coursework follow-up that shares no words with the earlier turns still uses the conversation's files.
+  const handIn = await chat({ conversationId: review.conversationId, message: "Do I need a screenshot?" });
+  assert.ok(handIn.events.find(e => e.type === "sources")?.sources.some((s: any) => s.source.title === "lab5.md"));
 });
 
 test("files: processing or missing files are refused; deleting removes the file and its sources", async () => {

@@ -12,6 +12,13 @@ export interface StudyPlan { scope: StudyScope; refs: SegmentRef[]; reason: stri
 const reviewPattern = /\b(is|are|was)\b[^.?!]{0,60}\b(complete|completed|done|finished|ready|correct|right|good enough|everything)\b|\b(did|have) i\b[^.?!]{0,40}\b(miss|forget|forgot|complete|finish|answer|cover|include)|\bcheck (my|the|this|our)\b[^.?!]{0,30}\b(submission|work|answers?|lab|assignment|report|homework|solution|code|essay)|\bgrade (my|this)|\b(missing|left out) anything\b|\bwhat('s| is| am i) missing\b|\bready to submit\b|\bmeet(s)? (all )?(the )?(requirements|rubric|criteria)\b|\b(compare|check) (it |this |my \w+ )?(against|with) (the )?(rubric|instructions|requirements)/i;
 const wholePattern = /\b(study|summari[sz]e|overview|walk me through|go through|break down|help me (complete|do|finish|with|understand|solve|start)|what (do|should) i (need|have) to do|what('s| is) (this|the) (lab|assignment|document|paper|homework|project) (about|asking)|all (the |of the )?(tasks|questions|requirements|steps|parts|deliverables|exercises|problems)|(entire|whole|full|complete) (lab|assignment|document|file|paper|pdf|homework|project)|every (task|question|requirement|step)|explain (this|the) (lab|assignment|document|paper|homework|project|file|pdf)|teach me|understand (this|the) (lab|assignment|document|material))\b/i;
 
+/**
+ * Wording that is about coursework — what to hand in, when it is due, how it is graded — so a short follow-up
+ * ("What exactly do I need to hand in?") keeps using the files already in the conversation.
+ */
+const courseworkPattern = /\b(hand(ed)? in|turn(ed)? in|submit(ted|ting)?|submission|deliverables?|due( date)?|deadline|late (penalty|policy|work)|grad(e|ed|ing)|points?|marks?|rubric|requirements?|screenshots?|instructions?|lab|assignment|homework|worksheet|report|exercise|task|question|step|part [a-h1-9]|what (do|should|must) (i|we) (need to |have to )?(do|write|include|submit|answer)|how (do|should) i (start|begin|do|approach))\b/i;
+export function aboutCoursework(question: string): boolean { return courseworkPattern.test(question); }
+
 /** Decides the scope from the wording; a question that names one unit is a lookup even if it says "explain". */
 export function planStudy(question: string): StudyPlan {
   const refs = segmentRefs(question);

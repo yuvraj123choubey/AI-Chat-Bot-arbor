@@ -6,7 +6,7 @@ import type { EvidenceSource } from "./types.ts";
  * Words a question is phrased with rather than what it is about: verbs (sources use other forms, "find" → "found")
  * and generic qualifiers ("best", "main", "ways"). They say nothing about whether the subject was covered.
  */
-const questionVerbs = new Set(tokenize("find found say said make made happen happened use used work works mean means cause caused show shows get got take took give gave know known need needs want called call compare explain describe best good better main top most important common different difference differences way ways type types kind kinds example examples reason reasons step steps thing things"));
+const questionVerbs = new Set(tokenize("find found say said make made happen happened use used work works mean means cause caused show shows get got take took give gave know known need needs want called call compare explain describe best good better main top most important common different difference differences way ways type types kind kinds example examples reason reasons step steps thing things exact exactly really actually basically specific specifically whole entire overall general detail details information info stuff"));
 
 export interface Coverage { coverage: number; covered: string[]; missing: string[] }
 

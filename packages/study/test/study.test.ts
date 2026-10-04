@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assignRoles, findSegments, finalizeStudyAnswer, gatherMaterial, outlineDocument, parseSheet, planStudy, reviewAnswer, reviewSubmission, segmentRefs, type StudyChunk, type StudyDoc } from "../src/index.ts";
+import { aboutCoursework, assignRoles, findSegments, finalizeStudyAnswer, gatherMaterial, missingUnitsAnswer, outlineDocument, parseSheet, planStudy, reviewAnswer, reviewSubmission, segmentRefs, stripEchoedQuestion, type StudyChunk, type StudyDoc } from "../src/index.ts";
 
 /** A document from pages of text, one chunk per page (as PDF ingest stores them). */
 function doc(id: string, name: string, pages: string[], extra: Partial<StudyDoc> = {}): StudyDoc {
@@ -39,6 +39,9 @@ test("plan: a named part is a lookup, the whole lab is studied, completeness is 
   assert.equal(planStudy("Did I miss anything in the rubric?").scope, "review");
   assert.equal(planStudy("What port does task 3 block?").scope, "lookup");
   assert.equal(planStudy("Summarize all the tasks").scope, "whole");
+  // Coursework wording keeps a conversation's files in use; small talk does not.
+  for (const q of ["What exactly do I need to hand in?", "When is it due?", "How is it graded?", "Do I need a screenshot?", "What should I write for the reflection?"]) assert.ok(aboutCoursework(q), q);
+  for (const q of ["hello there", "what is the capital of France", "thanks!"]) assert.ok(!aboutCoursework(q), q);
 });
 
 test("gather: the whole lab when it fits, the named unit for a lookup, and units that don't exist are reported", () => {
@@ -55,9 +58,19 @@ test("gather: the whole lab when it fits, the named unit for a lookup, and units
   assert.equal(look.evidence[0].source.metadata.locator && (look.evidence[0].source.metadata.locator as { page?: number }).page, 3, "the card opens where the answer is");
   assert.ok(look.evidence[0].passages.length < big.chunks.length);
   const missing = gatherMaterial({ question: "What is question 9?", plan: planStudy("What is question 9?"), docs: [big], queryVector: [], budgetChars: 20_000 });
-  assert.match(missing.notFound[0], /question 9 — no unit with that number/);
+  assert.equal(missing.notFound[0], "question 9 — there is no question 9 in big.pdf (it has Task 1–Task 4)");
+  assert.equal(missingUnitsAnswer(planStudy("What is question 9?"), missing), "There is no Question 9 in big.pdf — big.pdf has Task 1–Task 4. I couldn't find what you're asking about in your files, so I won't guess what it says. Which one did you mean?");
+  assert.equal(missingUnitsAnswer(planStudy("What does task 3 ask me to block?"), look), undefined, "a unit that exists is answered normally");
   assert.match(finalizeStudyAnswer("Here is what I found.", missing), /> I couldn't find question 9 in your files/);
   assert.equal(finalizeStudyAnswer("I couldn't find question 9 in the lab.", missing), "I couldn't find question 9 in the lab.");
+  // Final checks: no echoed question, and a whole-lab answer always carries the due date the files state.
+  assert.equal(stripEchoedQuestion("And what does task 7 ask?\nTask 7 is not in the lab.", "And what does task 7 ask?"), "Task 7 is not in the lab.");
+  assert.equal(stripEchoedQuestion("What is the late penalty for this lab? It is not stated [1].", "What is the late penalty for this lab?"), "It is not stated [1].");
+  assert.equal(stripEchoedQuestion("The penalty is not stated.", "What is the late penalty?"), "The penalty is not stated.");
+  assert.deepEqual(whole.deadlines.map(d => [d.text, d.page]), [["Due Friday, October 10 at 11:59 pm.", 1]]);
+  const plan = planStudy("Study this lab");
+  assert.match(finalizeStudyAnswer("Lab 5 has four tasks.", whole, { plan, ordinalOf: () => 1 }), /^\*\*Due:\*\* Friday, October 10 at 11:59 pm\. \[1\]\n\nLab 5 has four tasks\./);
+  assert.equal(finalizeStudyAnswer("It is due Friday, October 10 at 11:59 pm [1].", whole, { plan }), "It is due Friday, October 10 at 11:59 pm [1].");
 });
 
 test("study sheet: only items whose quote is really in the document survive", () => {
@@ -78,32 +91,35 @@ test("review: every requirement checked, fabricated evidence rejected, missing s
   const generate = async (messages: { content: string }[]) => {
     const prompt = messages[1].content;
     calls.push(prompt);
-    if (/REQUIREMENT \(Task 1/.test(prompt)) return "MET | Explains the status output | \"Status: active means the firewall is on\"";
-    if (/REQUIREMENT \(Task 2/.test(prompt)) return "MET | Allows SSH and says why | \"I ran sudo ufw allow 22/tcp so that I can still log in remotely\"";
-    if (/REQUIREMENT \(Task 3/.test(prompt)) return "MET | Blocks the port | \"I ran sudo ufw deny 8080 to block the port.\"";
-    return "MET | Has a reflection | \"In production I would log every dropped packet\"";
+    if (/TASK \(Task 1/.test(prompt)) return "P1: YES | \"Status: active means the firewall is on\"";
+    if (/TASK \(Task 2/.test(prompt)) return "P1: YES | \"I ran sudo ufw allow 22/tcp so that I can still log in remotely\"";
+    if (/TASK \(Task 3/.test(prompt)) return "P1: YES | \"I ran sudo ufw deny 8080 to block the port.\"";
+    return "P1: YES | \"In production I would log every dropped packet\"";
   };
   const roles = assignRoles([lab, submission]);
   assert.deepEqual(roles.docs.map(d => d.role), ["instructions", "submission"]);
   const result = await reviewSubmission({ docs: [lab, submission], sheets: new Map(), generate });
   assert.deepEqual(result.checks.map(c => [c.requirement.label, c.status]), [["Task 1", "met"], ["Task 2", "met"], ["Task 3", "partial"], ["Task 4", "missing"]]);
   assert.equal(result.checks[2].screenshot, "missing");
-  assert.match(result.checks[2].note, /screenshot could not be verified: images inside your submission file are not inspected/);
-  assert.equal(result.checks[3].note, "Nothing in your submission addresses this.", "no model call when nothing matches");
+  assert.match(result.checks[2].note, /Couldn't verify: Include a screenshot .*images inside your submission file are not inspected/);
+  assert.deepEqual(result.checks[0].parts.map(p => [p.part.kind, p.status]), [["command", "yes"], ["judge", "yes"]], "the command is checked without the model");
+  assert.equal(result.checks[3].note, "Your submission has no Task 4 section.", "no model call for a task the numbered submission skips");
   assert.equal(calls.length, 3);
-  assert.match(calls[2], /\[Task 3, p\. 2\]\nTask 3\nI ran sudo ufw deny 8080/, "the submission's own Task 3 is the evidence");
+  assert.match(calls[2], /SUBMISSION:\nTask 3\nI ran sudo ufw deny 8080/, "the submission's own Task 3 is the evidence");
+  assert.match(calls[2], /PARTS:\nP1: Block incoming traffic on port 8080\.\n\n/, "only the judged part is asked; the screenshot is checked separately");
   const answer = reviewAnswer(result, id => (id === "lab" ? 1 : 2));
   assert.match(answer, /^\*\*Not yet\.\*\* 2 of 4 requirements are complete\./);
   assert.match(answer, /- ✓ \*\*Task 1\*\* — Complete — "Status: active means the firewall is on" \[2\]/);
   assert.match(answer, /- ⚠ \*\*Task 3\*\* — .*screenshot/);
-  assert.match(answer, /- ✗ \*\*Task 4\*\* — Missing — Nothing in your submission addresses this\. \(required in \[1\]\)/);
+  assert.match(answer, /- ✗ \*\*Task 4\*\* — Missing — Your submission has no Task 4 section\. \(required in \[1\]\)/);
   assert.match(answer, /### What to fix\n1\. \*\*Task 3\*\*/);
   assert.match(answer, /Images inside PDF or Word files are not inspected/);
 
   // A verdict whose quote is not in the submission is not trusted.
-  const lying = await reviewSubmission({ docs: [lab, doc("sub2", "answers.pdf", ["Task 1\nThe firewall status is active.\nTask 4\nI would add logging."])], sheets: new Map(), generate: async () => "MET | Done | \"a sentence the student never wrote\"" });
-  assert.ok(lying.checks.filter(c => c.status !== "missing").every(c => c.status === "unclear"));
-  assert.match(lying.checks[0].note, /couldn't find the exact passage/);
+  const lying = await reviewSubmission({ docs: [lab, doc("sub2", "answers.pdf", ["Task 1\nThe firewall status is active.\nTask 4\nI would add logging."])], sheets: new Map(), generate: async () => "P1: YES | \"a sentence the student never wrote\"" });
+  assert.ok(lying.checks.every(c => c.status !== "met"), "an invented quote never makes a requirement complete");
+  assert.equal(lying.checks[3].status, "unclear");
+  assert.match(lying.checks[0].note, /Missing: Run sudo ufw status verbose \(`ufw status verbose` is not shown\)\. Couldn't verify: Explain each line of the output \(I couldn't find the words/);
 
   // Only instructions: no guessing.
   const alone = await reviewSubmission({ docs: [{ ...lab, role: "instructions" }], sheets: new Map(), generate });

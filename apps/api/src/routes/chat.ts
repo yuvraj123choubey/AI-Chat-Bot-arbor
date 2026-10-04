@@ -12,7 +12,7 @@ import { eventAnswerRules } from "../../../../packages/research/src/prompt.ts";
 import type { EvidenceSource } from "../../../../packages/research/src/types.ts";
 import { generateText } from "../../../../packages/ai/src/structured.ts";
 import type { App } from "../app.ts";
-import { assignRoles, finalizeStudyAnswer, gatherMaterial, outlineDocument, planStudy, reviewAnswer, reviewSubmission, studyPrompt, studyRules, type StudyDoc, type StudyMaterial, type StudySheet } from "../../../../packages/study/src/index.ts";
+import { aboutCoursework, assignRoles, finalizeStudyAnswer, gatherMaterial, missingUnitsAnswer, outlineDocument, planStudy, reviewAnswer, reviewSubmission, studyPrompt, studyRules, type StudyDoc, type StudyMaterial, type StudySheet } from "../../../../packages/study/src/index.ts";
 import { fileEvidence, questionRefersToFiles, strongFileMatch, type FileEvidence } from "../documents-evidence.ts";
 import { cachedStudySheet, loadStudyDocs, studyBudget, studyGenerate, studySheetFor } from "../study.ts";
 import { ndjson, readJson, send, type RouteContext } from "../http.ts";
@@ -279,6 +279,14 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
       const [vector] = await app.embedder.embed([searchText], "query");
       material = gatherMaterial({ question: searchText, plan: studyPlan, docs, queryVector: vector, budgetChars: budget, sheets });
       files = { evidence: material.evidence, locators: new Map(), strongest: 1 };
+      // Asking only about parts the files don't have is answered directly: it is not there, and here is what is.
+      const known = missingUnitsAnswer(studyPlan, material);
+      if (known) {
+        evidence = material.evidence;
+        await announceSources(material.evidence);
+        grounding = citationRules;
+        reviewText = known;
+      }
       const modes = material.reading.map(r => `${r.name}: ${r.mode === "complete" ? "read completely" : r.mode === "sections" ? "relevant sections" : r.mode === "passages" ? "matching passages" : r.mode === "image-text" ? "text in image" : "image not readable"}`);
       status({ stage: "reading", label: "Studying your files", detail: modes.join(" · ") });
       return !stream.signal.aborted;
@@ -289,7 +297,12 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     // match it very strongly. Scope "files"/"both" always looks, "web" never does.
     const scope = input.searchScope;
     const earlier = scope === "web" ? [] : (await app.documents.linkedIds("conversation", conversation.id)).filter(id => !input.documentIds.includes(id));
-    const followsUp = earlier.length > 0 && (continuing || questionRefersToFiles(question) || studyPlan.scope !== "lookup" || studyPlan.refs.length > 0);
+    let followsUp = earlier.length > 0 && (continuing || questionRefersToFiles(question) || aboutCoursework(question) || studyPlan.scope !== "lookup" || studyPlan.refs.length > 0);
+    // Otherwise a real question that matches the conversation's files closely still uses them; greetings never do.
+    if (earlier.length && !followsUp && question.split(/\s+/).length >= 4) {
+      try { followsUp = (await fileEvidence(app, workspaceId, searchText, { documentIds: earlier, signal: stream.signal })).strongest >= CONVERSATION_FILE_MATCH; }
+      catch (error) { if (stream.signal.aborted) return stopped(); }
+    }
     let studyIds = [...input.documentIds, ...(followsUp ? earlier : [])];
     const explicitFiles = studyIds.length > 0 || scope === "files" || scope === "both" || questionRefersToFiles(question);
     if (scope !== "web" && !studyIds.length && (input.searchMode !== "off" || explicitFiles) && await app.documents.readyCount(workspaceId) > 0) {
@@ -357,7 +370,8 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     // People the sources mention but do not name are always reported as not identified, never left out.
     const identified = checked !== undefined && verifiedFacts.length ? ensureUnidentified(checked, verifiedFacts) : checked;
     // Final consistency check for study answers: named parts that are not in the files, and images not inspected, are said plainly.
-    const completed = identified !== undefined && material ? finalizeStudyAnswer(identified, material) : identified;
+    const studied = material;
+    const completed = identified !== undefined && studied ? finalizeStudyAnswer(identified, studied, { question, plan: studyPlan, ordinalOf: id => studied.evidence.find(e => e.source.metadata.documentId === id)?.ordinal }) : identified;
     const cited = completed !== undefined ? sanitizeCitations(mentionOtherEvents(tidyAnswer(completed), matchedEvents, evidence), allowed) : first;
     const linked = sanitizeLinks(cited.text, [...sourceUrls, ...userUrls]);
     if (first.removed.length) console.warn(`Removed citation markers for unsupplied sources: ${first.removed.join(", ")}`);
@@ -372,6 +386,8 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
   } finally { app.generating.delete(conversation.id); }
 }
 
+/** How closely a message must match the conversation's own files to keep using them when nothing else says so. */
+const CONVERSATION_FILE_MATCH = 0.62;
 const fileRules = "Sources from \"Your files\" are the user's own documents: treat them as the authority on their own content, cite them like any other source, and mention the page, section or lines when that helps the user find the passage.";
 
 /** The query planner uses the cheapest suitable model, or the user's chosen model so data stays with that provider. */

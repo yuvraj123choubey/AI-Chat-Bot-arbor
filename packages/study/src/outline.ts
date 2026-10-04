@@ -20,6 +20,9 @@ const levelOf: Record<SegmentKind, number> = { part: 1, task: 2, question: 2, ex
 const named = /^\s*(?:#{1,4}\s*)?(?:\*\*)?\s*(lab task|task|question|exercise|problem|part|step|activity|checkpoint|deliverable|q)\s*[-#:.]?\s*(\d{1,3}(?:\.\d{1,2})?[a-z]?|[a-h]|[ivx]{1,4})(?![\w&])[\s).:\-–—*]*(.{0,160})$/i;
 const numbered = /^\s*(\d{1,2})[.)]\s+(\S.{3,200})$/;
 
+/** Headings of document-wide sections that are not part of any task. */
+const sectionHeading = /^\s*(?:#{1,4}\s*)?(?:\*\*)?\s*(grading|grading criteria|rubric|marking( scheme)?|evaluation|submission( instructions| guidelines)?|how to submit|deliverables|restrictions|academic integrity|late (policy|penalty|work)|references|appendix|notes|resources)\s*:?\s*(?:\*\*)?\s*$/i;
+
 interface Line { text: string; documentId: string; page?: number; section?: string; line?: number; ordinal: number }
 function linesOf(chunks: StudyChunk[]): Line[] {
   const out: Line[] = [];
@@ -61,7 +64,9 @@ export function outlineDocument(chunks: StudyChunk[]): Segment[] {
   return heads.map((h, i) => {
     const level = levelOf[h.kind];
     const next = heads.slice(i + 1).find(o => levelOf[o.kind] <= level);
-    const body = lines.slice(h.at, next ? next.at : lines.length);
+    // A general section heading ("Grading", "Submission") after the unit ends it too.
+    const stop = lines.findIndex((l, at) => at > h.at && (!next || at < next.at) && sectionHeading.test(l.text));
+    const body = lines.slice(h.at, stop >= 0 ? stop : next ? next.at : lines.length);
     const first = body[0], lastLine = body.findLast(l => l.text.trim()) ?? first;
     const label = `${h.kind[0].toUpperCase()}${h.kind.slice(1)} ${/^[a-h]$/.test(h.number) ? h.number.toUpperCase() : h.number}`;
     return {

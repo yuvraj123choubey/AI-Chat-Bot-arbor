@@ -1,3 +1,4 @@
+import { ruleBasedItems } from "../../assignments/src/extract.ts";
 import { describeLocator, retrieveChunks, type StoredChunk } from "../../files/src/retrieve.ts";
 import { tokenize } from "../../research/src/passages.ts";
 import type { EvidenceSource, Passage } from "../../research/src/types.ts";
@@ -18,6 +19,23 @@ export interface StudyMaterial {
   notFound: string[];
   /** How each document was read, for the status line and the answer's honesty notes. */
   reading: { name: string; mode: "complete" | "sections" | "passages" | "image-text" | "image-unread"; chars: number }[];
+  /** The numbered units each document has ("Task 1", …), so a missing one can be answered with what does exist. */
+  units: { name: string; labels: string[] }[];
+  /** Lines of the documents that state a due date or deadline, word for word. */
+  deadlines: { text: string; documentId: string; page?: number }[];
+}
+
+/** "Task 1–Task 5" for a run of same-kind consecutive units, else the labels listed. */
+export function unitRange(labels: string[]): string {
+  if (!labels.length) return "";
+  const parsed = labels.map(l => l.match(/^(.*?)\s+(\d+)$/));
+  const sameKind = parsed.every(p => p && p[1] === parsed[0]![1]);
+  const consecutive = sameKind && parsed.every((p, i) => Number(p![2]) === Number(parsed[0]![2]) + i);
+  return consecutive && labels.length > 2 ? `${labels[0]}–${labels.at(-1)}` : labels.join(", ");
+}
+/** The units of an outline that are tasks or questions (or parts, when a document has nothing smaller). */
+function topUnits(outline: ReturnType<typeof outlineDocument>) {
+  return outline.filter(s => s.level === 2 || (s.level === 1 && !outline.some(o => o.level === 2)));
 }
 
 function docChars(doc: StudyDoc) { return doc.chunks.reduce((n, c) => n + c.text.length, 0); }
@@ -60,7 +78,10 @@ export function gatherMaterial(input: {
   } else {
     // The named units first, in full.
     const { found, missing } = findSegments(plan.refs, allSegments);
-    for (const ref of missing) notFound.push(`${ref.text.trim()} — no unit with that number was found in ${docs.map(d => d.name).join(", ")}`);
+    for (const ref of missing) {
+      const have = unitRange(topUnits(allSegments).map(s => s.label));
+      notFound.push(`${ref.text.trim()} — there is no ${ref.text.trim()} in ${docs.map(d => d.name).join(", ")}${have ? ` (it has ${have})` : ""}`);
+    }
     for (const seg of found) addSegment(seg);
     // Small documents are read completely.
     for (const doc of docs) if (docChars(doc) <= SMALL_DOC) for (const c of doc.chunks) take(c);
@@ -112,7 +133,10 @@ export function gatherMaterial(input: {
       }
     });
   }
-  return { evidence, brief: briefs.filter(Boolean).join("\n\n"), notFound, reading };
+  const units = docs.map(d => ({ name: d.name, labels: topUnits(outlines.get(d.id)!).map(s => s.label) }));
+  const deadlines = ruleBasedItems(docs.filter(d => !d.image && d.role !== "submission").flatMap(d => d.chunks.map(c => ({ documentId: d.id, documentName: d.name, role: "instructions", text: c.text, page: c.page, section: c.section }))))
+    .filter(i => i.kind === "deadline").map(i => ({ text: i.quote, documentId: i.documentId, page: i.page }));
+  return { evidence, brief: briefs.filter(Boolean).join("\n\n"), notFound, reading, units, deadlines };
 }
 
 /** A plain statement of how the material was read, for the model and for the user. */

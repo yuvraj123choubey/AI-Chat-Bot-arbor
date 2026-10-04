@@ -18,7 +18,8 @@
     "test": "node --experimental-transform-types --test --test-timeout=60000 \"packages/*/test/*.test.ts\" \"apps/*/test/*.test.ts\"",
     "check:search": "tsx scripts/check-search.ts",
     "dev:llm": "tsx apps/local-llm/src/server.ts",
-    "eval:agent": "tsx packages/code/eval/run.ts"
+    "eval:agent": "tsx packages/code/eval/run.ts",
+    "eval:study": "tsx packages/study/eval/run.ts"
   },
   "dependencies": {
     "@codemirror/commands": "^6.11.1",
@@ -52,6 +53,7 @@
     "prisma": "^7.10.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "sharp": "^0.35.5",
     "tesseract.js": "^7.0.0",
     "undici": "^8.11.2"
   },

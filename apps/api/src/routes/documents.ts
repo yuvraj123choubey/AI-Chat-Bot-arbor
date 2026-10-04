@@ -60,7 +60,16 @@ export function documentRoutes(app: App) {
       catch (error) { return send(ctx.res, error instanceof UploadError ? error.status : 400, { error: error instanceof Error ? error.message : "Upload failed" }); }
       try {
         const existing = await app.documents.findBySha(workspaceId, file.sha256);
-        if (existing) { await rm(file.tempFile, { force: true }); return send(ctx.res, 200, { document: existing, taskId: null }); }
+        if (existing) {
+          await rm(file.tempFile, { force: true });
+          // Text recognition improves over time and is cheap, so an image uploaded again is read again.
+          if (existing.mimeType.startsWith("image/") && existing.status !== "processing") {
+            await app.db.document.update({ where: { id: existing.id }, data: { status: "processing", error: null } });
+            const taskId = await app.tasks.submit({ workspaceId, userId: app.identity.userId, type: "document_ingest", title: `Read ${existing.name} again`, input: { documentId: existing.id } });
+            return send(ctx.res, 202, { document: { ...existing, status: "processing" }, taskId });
+          }
+          return send(ctx.res, 200, { document: existing, taskId: null });
+        }
         let type;
         try { type = detectFileType(file.name, await readFile(file.tempFile)); }
         catch (error) { await rm(file.tempFile, { force: true }); return send(ctx.res, 415, { error: error instanceof UnsupportedFileError ? error.message : "Unsupported file." }); }
