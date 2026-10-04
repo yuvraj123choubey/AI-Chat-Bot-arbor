@@ -6,7 +6,7 @@ import { detectProject } from "./preview.ts";
 import { describeFile, findSymbol, indexRepo, relevantFiles, type RepoIndex } from "./repo-index.ts";
 import type { CommandRunner, RunInfo } from "./runner.ts";
 import { checkCommand } from "./runner.ts";
-import { viewPage } from "./browser.ts";
+import { describeLayout, viewPage, type ViewportName } from "./browser.ts";
 import type { ProjectFiles } from "./workspace.ts";
 import { cleanRelative } from "./paths.ts";
 import { isQuestion, looksLikeBugReport } from "./intent.ts";
@@ -20,15 +20,18 @@ export type AgentAction = (
   | { action: "read_range"; path: string; start_line: number; end_line: number }
   | { action: "search_code"; query: string }
   | { action: "find_symbol"; name: string }
+  | { action: "find_references"; name: string }
+  | { action: "inspect_dependencies"; path: string }
   | { action: "apply_patch"; path: string; edits: Edit[] }
   | { action: "create_file"; path: string; content: string }
   | { action: "write_file"; path: string; content: string }
   | { action: "delete_file"; path: string }
+  | { action: "rename_file"; path: string; new_path: string }
   | { action: "run_command"; command: string }
-  | { action: "run_tests" } | { action: "run_build" } | { action: "run_checks" }
+  | { action: "run_tests" } | { action: "run_build" } | { action: "run_checks" } | { action: "run_typecheck" } | { action: "run_lint" }
   | { action: "git_status" } | { action: "git_diff"; path: string }
   | { action: "checkpoint"; label: string } | { action: "revert" }
-  | { action: "view_page"; path: string; click: string }
+  | { action: "view_page"; path: string; click: string; viewport?: "desktop" | "mobile" | "both" }
   | { action: "finish"; summary: string }
 ) & Partial<Note>;
 
@@ -55,13 +58,19 @@ export const actionSchema = {
     variant("update_plan", { plan: { type: "array", items: { type: "object", properties: { step: s, status: { enum: ["todo", "doing", "done"] } } } } }),
     variant("list_directory", { path: s }), variant("read_file", { path: s }),
     variant("read_range", { path: s, start_line: { type: "integer" }, end_line: { type: "integer" } }),
-    variant("search_code", { query: s }), variant("find_symbol", { name: s }),
+    variant("search_code", { query: s }), variant("find_symbol", { name: s }), variant("find_references", { name: s }), variant("inspect_dependencies", { path: s }),
     variant("apply_patch", { path: s, edits: { type: "array", items: { type: "object", properties: { find: s, replace: s } } } }),
-    variant("create_file", { path: s, content: s }), variant("write_file", { path: s, content: s }), variant("delete_file", { path: s }),
-    variant("run_command", { command: s }), variant("run_tests"), variant("run_build"), variant("run_checks"),
+    variant("create_file", { path: s, content: s }), variant("write_file", { path: s, content: s }), variant("delete_file", { path: s }), variant("rename_file", { path: s, new_path: s }),
+    variant("run_command", { command: s }), variant("run_tests"), variant("run_build"), variant("run_checks"), variant("run_typecheck"), variant("run_lint"),
     variant("git_status"), variant("git_diff", { path: s }), variant("checkpoint", { label: s }), variant("revert"),
-    variant("view_page", { path: s, click: s }), variant("finish", { summary: s })
+    variant("view_page", { path: s, click: s, viewport: { enum: ["desktop", "mobile", "both"] } }), variant("finish", { summary: s })
   ]
+};
+
+/** Names other coding agents use for the same tools. */
+const aliases: Record<string, string> = {
+  inspect_git_status: "git_status", inspect_diff: "git_diff", create_checkpoint: "checkpoint", revert_checkpoint: "revert",
+  open_preview: "view_page", inspect_browser: "view_page", run_typecheck_check: "run_typecheck", read: "read_file", grep: "search_code", ls: "list_directory"
 };
 
 /** Checks a model reply and turns it into an action, or says what is wrong with it (fed back for a retry). */
@@ -69,7 +78,7 @@ export function validateAction(data: any): AgentAction | string {
   const str = (v: unknown) => (typeof v === "string" ? v : undefined);
   const note = str(data?.note)?.slice(0, 300);
   const need = (...keys: string[]) => keys.find(k => str(data?.[k]) === undefined);
-  const a = data?.action;
+  const a = aliases[data?.action] ?? data?.action;
   switch (a) {
     case "update_plan": {
       const plan = Array.isArray(data.plan) ? data.plan.filter((p: any) => str(p?.step)).map((p: any) => ({ step: p.step.slice(0, 200), status: ["todo", "doing", "done"].includes(p.status) ? p.status : "todo" })).slice(0, 12) : [];
@@ -79,17 +88,19 @@ export function validateAction(data: any): AgentAction | string {
     case "read_file": case "delete_file": return need("path") ? `${a} needs path` : { action: a, path: data.path, note };
     case "read_range": return need("path") || !Number.isFinite(data.start_line) ? "read_range needs path, start_line, end_line" : { action: a, path: data.path, start_line: Math.max(1, Math.floor(data.start_line)), end_line: Math.floor(data.end_line) || Math.floor(data.start_line) + 200, note };
     case "search_code": return str(data.query)?.trim() ? { action: a, query: data.query, note } : "search_code needs a query";
-    case "find_symbol": return str(data.name)?.trim() ? { action: a, name: data.name.trim(), note } : "find_symbol needs a name";
+    case "find_symbol": case "find_references": return str(data.name)?.trim() ? { action: a, name: data.name.trim(), note } : `${a} needs a name`;
+    case "inspect_dependencies": return { action: a, path: str(data.path) ?? "", note };
+    case "rename_file": return need("path") || !str(data.new_path ?? data.to)?.trim() ? "rename_file needs path and new_path" : { action: a, path: data.path, new_path: (data.new_path ?? data.to).trim(), note };
     case "apply_patch": {
       const edits = Array.isArray(data.edits) ? data.edits.filter((e: any) => str(e?.find) !== undefined && str(e?.replace) !== undefined) : [];
       return need("path") || !edits.length ? "apply_patch needs path and edits [{find, replace}]" : { action: a, path: data.path, edits: edits.map((e: any) => ({ find: e.find, replace: e.replace })), note };
     }
     case "create_file": case "write_file": return need("path", "content") ? `${a} needs path and content` : { action: a, path: data.path, content: data.content, note };
     case "run_command": return str(data.command)?.trim() ? { action: a, command: data.command.trim(), note } : "run_command needs a command";
-    case "run_tests": case "run_build": case "run_checks": case "git_status": case "revert": return { action: a, note };
+    case "run_tests": case "run_build": case "run_checks": case "run_typecheck": case "run_lint": case "git_status": case "revert": return { action: a, note };
     case "git_diff": return { action: a, path: str(data.path) ?? "", note };
     case "checkpoint": return { action: a, label: str(data.label)?.trim() || "Checkpoint", note };
-    case "view_page": return { action: a, path: str(data.path) ?? "", click: str(data.click) ?? "", note };
+    case "view_page": return { action: a, path: str(data.path) ?? "", click: str(data.click) ?? "", viewport: ["mobile", "both"].includes(data.viewport) ? data.viewport : "desktop", note };
     case "finish": return { action: a, summary: str(data.summary)?.trim() || note || "Done.", note };
     default: return `action must be one of ${actionSchema.oneOf.map(v => (v.properties.action as { const: string }).const).join(", ")}`;
   }
@@ -106,6 +117,12 @@ function lineChanges(before: string[], after: string[]): { added: number; remove
 const numbered = (lines: string[], from = 1) => lines.map((l, i) => `${String(i + from).padStart(4)}| ${l}`).join("\n");
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}\n… [${text.length - max} more characters]` : text);
 const tail = (text: string, max: number) => (text.length > max ? `[… earlier output omitted]\n${text.slice(-max)}` : text);
+/** What identifies a failure across runs: its first error lines, without temp paths, timings or line numbers. */
+export function failureKey(output: string): string {
+  return failureDigest(output, 400).split("\n").slice(0, 2).join(" ")
+    .replace(/file:\/\/\/?\S+?\/(?=[\w.-]+\.\w+)/g, "").replace(/[A-Za-z]:\\\S+\\/g, "").replace(/\(\d+(\.\d+)?ms\)/g, "").replace(/:\d+(:\d+)?/g, "").replace(/\s+/g, " ").trim();
+}
+
 /** The most informative lines of a failing command: errors, assertion messages, file:line references. */
 export function failureDigest(output: string, max = 600): string {
   const lines = output.split("\n").filter(l => /error|fail|assert|expected|actual|not ok|traceback|exception|cannot|undefined|✖|×|\w+\.\w+:\d+/i.test(l) && !/^\s*(at\s+(node:|internal\/)|ℹ)/.test(l));
@@ -116,10 +133,11 @@ export function agentSystemPrompt(): string {
   return [
     "You are Arbor's coding agent. You work inside one real project and act only through tools. Work like a strong senior engineer:",
     "INSPECT: never assume a file, function, route, dependency or framework exists. Use list_directory, search_code, find_symbol and read_file to look first. For an error, find the file and line it names and read that code.",
+    "UNDERSTAND: before changing a function, find_references shows every place that uses it; inspect_dependencies shows what a file imports and who imports it, or the project's packages and scripts. Follow the patterns the code already uses.",
     "PLAN: for anything beyond a one-line fix, call update_plan with short steps, and update it as steps are done.",
     "EDIT: make the smallest correct change with apply_patch. Each edit's `find` is copied exactly from read_file output (without the line-number prefix) and must be unique; include a few surrounding lines. For a small file (under 200 lines) that needs several changes, write_file with its complete new content is safer than many patches. Use create_file only for new files. Do not rewrite or reformat unrelated code. Follow the project's existing style and structure.",
     "REPRODUCE: for a reported bug, if the existing tests pass they do not cover it. First read the module under test so the test uses its real exports, then add a small test for the exact reported case (patch the existing test file, or create_file for a new one in the same style), run it to see it fail, then fix the code until it passes. Fix the root cause in the module that computes the value, not a workaround where it is displayed.",
-    "VERIFY: after editing, run_tests (or run_checks for tests, typecheck, lint and build). Read failures, fix the cause, and run again until they pass. For web pages, view_page shows what renders and any console errors.",
+    "VERIFY: after editing, run_tests (or run_checks for tests, typecheck, lint and build). Read failures, fix the cause, and run again until they pass. run_typecheck and run_lint run just those checks. For web pages, view_page shows what renders, console errors and whether the layout fits; use viewport \"mobile\" or \"both\" for layout and responsive work. Never repeat a failed action unchanged: read the error and change the approach.",
     "FINISH: call finish with a short summary of what changed, which checks pass, and anything still failing or not verified. You cannot finish while checks you broke are failing unless you explain why you are blocked.",
     "If the task is unclear or impossible in this project, inspect enough to explain why, then finish without editing.",
     "Reply with exactly one JSON tool call per turn. `note` is one short sentence shown to the user describing what you are doing (not private reasoning). Paths are relative to the project root."
@@ -155,7 +173,10 @@ export function referencedFiles(text: string, paths: Set<string>): string[] {
 export const isTestFile = (path: string) => /(^|\/)(tests?|__tests__|spec)\/|\.(test|spec)\.[a-z]+$|(^|\/)test_[^/]+\.py$|_test\.(py|go)$|Test\.java$/i.test(path);
 
 /** Tools that only look; repeating one before anything has changed returns the same answer. */
-const inspectActions = new Set<AgentAction["action"]>(["read_file", "read_range", "list_directory", "search_code", "find_symbol", "git_status", "git_diff", "update_plan"]);
+/** Tasks about how a page is laid out on different screens. */
+const layoutTask = /\b(responsive|mobile|phones?|small screens?|narrow screens?|tablets?|screen sizes?|media quer(y|ies)|breakpoints?|viewport)\b/i;
+
+const inspectActions = new Set<AgentAction["action"]>(["read_file", "read_range", "list_directory", "search_code", "find_symbol", "find_references", "inspect_dependencies", "git_status", "git_diff", "update_plan"]);
 
 /**
  * The agent loop: inspect → plan → edit → run → observe → fix → retest. Each turn the model sees the project
@@ -181,6 +202,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
     checkState: new Map<string, { status: "pending" | "passed" | "failed"; afterEdit: boolean }>(checks.map(c => [c.name, { status: "pending", afterEdit: false }]))
   };
   let lastEditAt = -1, step = 0, checkRuns = 0, retries = 0, blockedFinishes = 0, lastFailedRun = -1;
+  let lastGreen: string | undefined, greenEdits = 0, sameFailure = { key: "", count: 0 };
   const linesChanged = { added: 0, removed: 0 };
   const recent: Message[] = [];
   let lastSignature = "", lastAction = "", idleSteps = 0, freeSkips = 0;
@@ -208,7 +230,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
   const testsPassAtStart = checks.some(c => c.name === "test") && memory.checkState.get("test")?.status === "passed";
   const reproduce = looksLikeBugReport(task) && testsPassAtStart ? "\nNOTE: the tests pass but the task reports a bug, so the tests do not cover it. Add a test that reproduces the report, see it fail, then fix the root cause." : "";
   const baseline = baselineLines.length ? `BASELINE (before any change):\n${baselineLines.join("\n")}${reproduce}` : "";
-  let noChangeFinishes = 0, pageFinishes = 0, reproFinishes = 0, lastPageViewAt = -1;
+  let noChangeFinishes = 0, pageFinishes = 0, reproFinishes = 0, layoutFinishes = 0, lastPageViewAt = -1;
   const overview = await projectOverview(files, index, checks);
   emitState();
   deps.event({ kind: "inspect", title: `Indexed ${index.files.size} files`, detail: memory.relevant.slice(0, 4).map(r => r.path).join(", ") || undefined });
@@ -256,17 +278,19 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
   if (memory.edits.length && checks.length && [...memory.checkState.values()].some(c => !c.afterEdit)) await runChecks();
   index = await indexRepo(files);
   const checkpoint = await history.checkpoint(`Arbor agent: ${task.slice(0, 120)}`, "agent");
-  const diff = checkpoint && baseCommit ? await history.diff(baseCommit, checkpoint.commit) : undefined;
+  // Nothing new since a checkpoint taken during the run (e.g. when all checks passed): that commit is the result.
+  const finalCommit = checkpoint?.commit ?? (lastGreen || memory.edits.length ? (await history.log(1))[0]?.commit : undefined);
+  const diff = finalCommit && baseCommit && finalCommit !== baseCommit ? await history.diff(baseCommit, finalCommit) : undefined;
   const finalChecks = checks.map(c => ({ name: c.name, status: memory.checkState.get(c.name)!.status }));
   const checksPassing = checks.length && memory.edits.length ? finalChecks.every(c => c.status === "passed") : null;
   const metrics: AgentMetrics = {
-    success: finished && checksPassing !== false, finished, checksPassing, filesChanged: diff?.files.length ?? 0,
+    success: finished && checksPassing !== false && (Boolean(diff?.files.length) || isQuestion(task) || !summary.startsWith("No files were changed")), finished, checksPassing, filesChanged: diff?.files.length ?? 0,
     linesAdded: diff?.files.reduce((n, f) => n + f.added, 0) ?? linesChanged.added, linesRemoved: diff?.files.reduce((n, f) => n + f.removed, 0) ?? linesChanged.removed,
     retries, checkRuns, steps: step, elapsedMs: now() - started, finalChecks
   };
   deps.event({ kind: "finish", title: stoppedEarly ? "Stopped" : checksPassing === false ? "Finished with failing checks" : "Finished", detail: summary.slice(0, 400) });
   emitState();
-  return { summary, baseCommit, commit: checkpoint?.commit, diff, steps: step, edited: memory.edits.map(e => e.path).filter((p, i, a) => a.indexOf(p) === i), commands: memory.commands, stoppedEarly, metrics };
+  return { summary, baseCommit, commit: finalCommit, diff, steps: step, edited: memory.edits.map(e => e.path).filter((p, i, a) => a.indexOf(p) === i), commands: memory.commands, stoppedEarly, metrics };
 
   /**
    * The current, numbered content of files the agent has read or edited (most recent first, within a size budget),
@@ -331,9 +355,42 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
     const chosen = checks.filter(c => !names || names.includes(c.name));
     if (!chosen.length) return names ? `This project has no ${names.join("/")} command. Available: ${checks.map(c => c.command).join(", ") || "none"}. Use run_command to run something specific.` : "No checks are configured for this project.";
     const out: string[] = [];
-    for (const c of chosen) { const r = await runCheck(c); out.push(`${c.command}: ${r.passed ? "PASSED" : `FAILED\n${tail(r.output, 3500)}`}`); }
+    let failure = "";
+    for (const c of chosen) {
+      const r = await runCheck(c);
+      out.push(`${c.command}: ${r.passed ? "PASSED" : `FAILED\n${tail(r.output, 3500)}`}`);
+      if (!r.passed && !failure) failure = `${c.name}:${failureKey(r.output)}`;
+    }
+    if (memory.edits.length) {
+      const state = (name: string) => memory.checkState.get(name)!;
+      if (checks.every(c => state(c.name).status === "passed" && state(c.name).afterEdit)) {
+        // Every check passes after the agent's edits: remember this state to fall back to.
+        lastGreen = (await history.checkpoint(`Agent: all checks passing (${memory.edits.length} edit(s))`, "agent"))?.commit ?? (await history.log(1))[0]?.commit;
+        greenEdits = memory.edits.length;
+        sameFailure = { key: "", count: 0 };
+      } else if (failure) {
+        sameFailure = failure === sameFailure.key ? { key: failure, count: sameFailure.count + 1 } : { key: failure, count: 1 };
+        if (sameFailure.count >= 3) out.push(await recoverFromLoop());
+      }
+    }
     emitState();
     return out.join("\n\n");
+  }
+  /**
+   * The same failure three times in a row means the agent is stuck. If all checks passed at some point after its
+   * edits, the files go back to that state (the later edits are undone); otherwise it is told to change approach.
+   */
+  async function recoverFromLoop(): Promise<string> {
+    sameFailure = { key: "", count: 0 };
+    if (!lastGreen) return "STUCK: this exact failure happened three times in a row. Do not repeat the same edit. Re-read the failing file and the error, then change your approach, or revert to start over.";
+    await history.restore(lastGreen, "last state where all checks passed");
+    index = await indexRepo(files);
+    const undone = memory.edits.splice(greenEdits).map(e => e.path);
+    memory.edits.push({ path: "(recovery)", summary: `undid ${undone.length} edit(s) after the last passing state (${[...new Set(undone)].join(", ")})` });
+    for (const c of checks) memory.checkState.set(c.name, { status: "passed", afterEdit: true });
+    seenSinceEdit.clear();
+    deps.event({ kind: "edit", title: "Went back to the last state where all checks passed", detail: `undid edits to ${[...new Set(undone)].join(", ")}` });
+    return `AUTO-RECOVERY: this exact failure happened three times in a row, so the files are back to the last state where all checks passed. Your later edits (${[...new Set(undone)].join(", ")}) were undone. Do not make them again. If the code now does what the task asks, finish; otherwise take a different approach.`;
   }
   function noteEdit(path: string, summary: string, added: number, removed: number) {
     // A fix made after a check failed (since the previous edit) is one retry of the edit-test loop.
@@ -386,6 +443,34 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
         if (!hits.length) return `No definition named "${action.name}" was found. It may not exist; search_code can find uses of the name.`;
         const users = (path: string) => [...(index.importedBy.get(path) ?? [])].slice(0, 5);
         return hits.slice(0, 20).map(h => `${h.kind} ${h.name} — ${h.path}:${h.line}${h.exported ? " (exported)" : ""}${users(h.path).length ? `; ${h.path} is imported by ${users(h.path).join(", ")}` : ""}`).join("\n");
+      }
+      case "find_references": {
+        deps.event({ kind: "search", title: `Finding uses of ${action.name}`, detail: action.note });
+        const word = new RegExp(`(^|[^\\w$])${action.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`);
+        const defs = findSymbol(index, action.name).filter(h => h.name === action.name);
+        const isDef = (path: string, line?: number) => defs.some(d => d.path === path && d.line === line);
+        const hits = (await files.search(action.name, 400)).filter(h => h.line && word.test(h.text) && !isDef(h.path, h.line));
+        if (!defs.length && !hits.length) return `"${action.name}" is not defined or used anywhere in the project.`;
+        return [
+          defs.length ? `Defined: ${defs.map(d => `${d.path}:${d.line}`).join(", ")}` : "No definition found in the project (it may come from a package).",
+          hits.length ? `Used ${hits.length} time(s):\n${hits.slice(0, 60).map(h => `${h.path}:${h.line}: ${h.text.trim().slice(0, 160)}`).join("\n")}` : "Not used anywhere else."
+        ].join("\n");
+      }
+      case "inspect_dependencies": {
+        const path = action.path ? cleanRelative(action.path) : "";
+        deps.event({ kind: "inspect", title: path ? `Dependencies of ${path}` : "Project dependencies and scripts", detail: action.note });
+        if (path) {
+          const entry = index.files.get(path);
+          if (!entry) return `${path} is not in the project index (it may be ignored, binary or missing).`;
+          const users = [...(index.importedBy.get(path) ?? [])];
+          return [`${path} imports:`, ...(entry.imports.length ? entry.imports.map(i => `- ${i.spec}${i.file ? ` → ${i.file}` : " (package or built-in)"} (line ${i.line})`) : ["- nothing"]),
+            `Imported by: ${users.length ? users.join(", ") : "nothing"}`].join("\n");
+        }
+        const detected = await detectProject(files.root);
+        const pkg = await files.read("package.json").then(f => JSON.parse(f.content ?? "{}"), () => undefined);
+        return [`Project type: ${detected.label}.`, index.packages.length ? `Declared dependencies: ${index.packages.join(", ")}.` : "No declared dependencies.",
+          pkg?.scripts ? `package.json scripts: ${Object.entries(pkg.scripts).map(([k, v]) => `${k} = ${v}`).join("; ")}.` : "",
+          checks.length ? `Checks: ${checks.map(c => `${c.name} = ${c.command}`).join("; ")}.` : "No test, typecheck, lint or build command detected."].filter(Boolean).join("\n");
       }
       case "apply_patch": {
         const file = await files.read(action.path);
@@ -441,6 +526,16 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
         const users = [...(index.importedBy.get(path) ?? [])];
         return `Deleted ${path}.${users.length ? ` Warning: still imported by ${users.join(", ")}.` : ""}`;
       }
+      case "rename_file": {
+        const from = cleanRelative(action.path), to = cleanRelative(action.new_path);
+        const users = [...(index.importedBy.get(from) ?? [])];
+        await files.rename(from, to);
+        if (memory.read.delete(from)) memory.read.add(to);
+        index = await indexRepo(files);
+        noteEdit(to, action.note || `renamed from ${from}`, 0, 0);
+        deps.event({ kind: "edit", title: `Renamed ${from} → ${to}`, detail: action.note });
+        return `Renamed ${from} to ${to}.${users.length ? ` These files import the old path and must be updated: ${users.join(", ")}.` : ""}`;
+      }
       case "run_command": {
         checkCommand(action.command);
         deps.event({ kind: "run", title: `Running ${action.command}`, detail: action.note });
@@ -453,6 +548,8 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
       case "run_tests": return runChecks(["test"]);
       case "run_build": return runChecks(["build", "typecheck"]);
       case "run_checks": return runChecks();
+      case "run_typecheck": return runChecks(["typecheck"]);
+      case "run_lint": return runChecks(["lint"]);
       case "git_status": {
         deps.event({ kind: "inspect", title: "Checking what changed" });
         const pending = await history.pending();
@@ -489,9 +586,15 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
         lastPageViewAt = step;
         deps.event({ kind: "check", title: `Opening ${action.path || "the page"} in a browser`, detail: action.note });
         const url = deps.pageUrl?.();
-        const report = await viewPage(files.root, { path: action.path || "index.html", url: url ? new URL(action.path || "", url).toString() : undefined, actions: action.click ? [{ click: action.click }] : [] });
-        if (report.consoleErrors.length || report.error) memory.failures.push(`page ${action.path || "index.html"}: ${report.error ?? report.consoleErrors.slice(0, 3).join(" | ")}`);
-        return [report.error ? `ERROR: ${report.error}` : "", `Title: ${report.title}`, `Visible text:\n${clip(report.text, 2500)}`, report.consoleErrors.length ? `Console errors:\n${report.consoleErrors.join("\n")}` : "No console errors.", report.failedRequests.length ? `Failed requests:\n${report.failedRequests.join("\n")}` : ""].filter(Boolean).join("\n");
+        const sizes: ViewportName[] = action.viewport === "both" ? ["desktop", "mobile"] : [action.viewport ?? "desktop"];
+        const out: string[] = [];
+        for (const size of sizes) {
+          const report = await viewPage(files.root, { path: action.path || "index.html", url: url ? new URL(action.path || "", url).toString() : undefined, actions: action.click ? [{ click: action.click }] : [], viewport: size });
+          if (report.consoleErrors.length || report.error) memory.failures.push(`page ${action.path || "index.html"}: ${report.error ?? report.consoleErrors.slice(0, 3).join(" | ")}`);
+          if (report.layout && report.layout.pageWidth > report.layout.width + 1) memory.failures.push(`page ${action.path || "index.html"} (${size}): horizontal overflow, ${report.layout.overflowing.slice(0, 3).join(", ")}`);
+          out.push([sizes.length > 1 ? `--- ${size} ---` : "", report.error ? `ERROR: ${report.error}` : "", `Title: ${report.title}`, report.layout ? describeLayout(report.layout) : "", `Visible text:\n${clip(report.text, sizes.length > 1 ? 1200 : 2500)}`, report.consoleErrors.length ? `Console errors:\n${report.consoleErrors.join("\n")}` : "No console errors.", report.failedRequests.length ? `Failed requests:\n${report.failedRequests.join("\n")}` : ""].filter(Boolean).join("\n"));
+        }
+        return out.join("\n\n");
       }
       case "finish": {
         // A request for a change that ends with no change is questioned once (it may genuinely need none).
@@ -514,21 +617,38 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
           reproFinishes++;
           return "Not finished: the tests passed before your change too, so they do not show the reported bug is fixed. Add a test for the exact case in the task (in the project's existing test file or style), run_tests, and make sure it passes for the right reason.";
         }
-        // Edits to a web page are opened in a browser before finishing; console errors send the agent back once.
+        // Edits to a web page are opened in a browser before finishing; console errors send the agent back (up to twice).
         const webEdit = memory.edits.some(e => /\.(html?|css|m?jsx?|tsx|vue|svelte)$/i.test(e.path));
         const pageUrl = deps.pageUrl?.();
-        if (webEdit && lastPageViewAt < lastEditAt && pageFinishes < 1 && (pageUrl || index.files.has("index.html"))) {
+        if (webEdit && lastPageViewAt < lastEditAt && pageFinishes < 2 && (pageUrl || index.files.has("index.html"))) {
           pageFinishes++;
           lastPageViewAt = step;
           deps.event({ kind: "check", title: "Opening the page in a browser before finishing" });
-          const report = await viewPage(files.root, { path: "index.html", url: pageUrl });
+          // Buttons are clicked once each as well: many errors only happen on interaction.
+          const report = await viewPage(files.root, { path: "index.html", url: pageUrl, actions: [{ clickEach: "button, [role=button], input[type=submit], input[type=button]" }] });
           const problems = [report.error, ...report.consoleErrors].filter(Boolean) as string[];
           if (problems.length) {
             memory.failures.push(`page: ${problems.slice(0, 3).join(" | ")}`);
-            return `Not finished: the page shows errors after your edits:\n${problems.slice(0, 5).join("\n")}\nVisible text:\n${clip(report.text, 800)}\nFix the cause, then view_page to confirm.`;
+            return `Not finished: the page shows errors after your edits (loading it and clicking each button once):\n${problems.slice(0, 5).join("\n")}\nVisible text:\n${clip(report.text, 800)}\nFix the cause, then view_page to confirm.`;
+          }
+        }
+        // A responsive or mobile layout task is checked at phone width: nothing may stick out sideways, and phones
+        // need a viewport meta tag to render at their real width. Sent back up to twice.
+        if (webEdit && layoutTask.test(task) && layoutFinishes < 2 && (pageUrl || index.files.has("index.html"))) {
+          const report = await viewPage(files.root, { path: "index.html", url: pageUrl, viewport: "mobile" });
+          deps.event({ kind: "check", title: "Checking the layout at phone width before finishing", detail: report.layout ? describeLayout(report.layout).split("\n")[0] : undefined });
+          const l = report.layout;
+          if (l && (l.pageWidth > l.width + 1 || !l.viewportMeta)) {
+            layoutFinishes++;
+            memory.failures.push(`mobile layout: ${describeLayout(l).replace(/\n/g, " ")}`);
+            return `Not finished: at phone width the layout is not right yet.\n${describeLayout(l)}\nFix it (for example max-width: 100%, flex-wrap, a media query, or the viewport meta tag), then view_page with viewport "mobile" to confirm.`;
           }
         }
         summary = action.summary;
+        // Verify before claiming: a summary that says something was changed, when no file was, is corrected.
+        if (!memory.edits.length && !isQuestion(task) && /\b(now|updated|changed|added|fixed|made|implemented|created|renamed|removed|refactored|is (now )?(responsive|working|fixed))\b/i.test(summary)) {
+          summary = `No files were changed, so the task was not done. (The agent's summary claimed: "${summary.slice(0, 200)}")`;
+        }
         // Said plainly rather than implied: a bug fix with no test reproducing the report has not been shown to work.
         if (reproduce && memory.edits.length && !memory.edits.some(e => isTestFile(e.path))) summary += " (Not verified: no test reproduces the reported bug.)";
         finished = true;

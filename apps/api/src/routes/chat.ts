@@ -4,7 +4,7 @@ import { rankModels } from "../../../../packages/ai/src/router.ts";
 import type { Message, ModelDefinition, ReasoningMode } from "../../../../packages/ai/src/types.ts";
 import { citationClaims, citationRules, gatherEvidence, groundedUserPrompt, sanitizeCitations, sanitizeLinks, searchIntent, urls, type ResearchStatus, type SearchMode } from "../../../../packages/research/src/index.ts";
 import { claimsUnverifiable, type SearchIntent } from "../../../../packages/research/src/intent.ts";
-import { evidenceCoverage, gapNote, gapQueries, RESEARCH_AGAIN_BELOW } from "../../../../packages/research/src/coverage.ts";
+import { eventNotFound, evidenceCoverage, gapNote, gapQueries, notFoundAnswer, RESEARCH_AGAIN_BELOW } from "../../../../packages/research/src/coverage.ts";
 import { planQueries } from "../../../../packages/research/src/queries.ts";
 import { extractionMessages, factSheetBlock, parseFacts, sourcesForExtraction, type Fact } from "../../../../packages/research/src/facts.ts";
 import { applyVerdicts, claimsToVerify, enforcePrecision, ensureUnidentified, mentionOtherEvents, tidyAnswer, verifyMessages } from "../../../../packages/research/src/precision.ts";
@@ -174,6 +174,13 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
         evidence = combined;
         if (intent.event) matchedEvents = gathered.anchors ?? [];
         await announceSources(combined);
+        // An event that no source mentions was not found: say so plainly instead of writing around the gap.
+        if (intent.event && !files.evidence.length && eventNotFound(gap, gathered.anchors?.length ?? 0)) {
+          reviewText = notFoundAnswer(question, gap, { queries: gathered.queries ?? plan.queries, sources: gathered.evidence.length });
+          grounding = citationRules;
+          status({ stage: "writing", label: "Writing answer", detail: "No source mentions this event" });
+          return true;
+        }
         // For a specific event, the concrete details are extracted and each one checked against its source first.
         let sheet = "";
         if (intent.event && combined.length) {
@@ -301,7 +308,7 @@ export async function chatRoute(app: App, { req, res }: RouteContext) {
     // Otherwise a real question that matches the conversation's files closely still uses them; greetings never do.
     if (earlier.length && !followsUp && question.split(/\s+/).length >= 4) {
       try { followsUp = (await fileEvidence(app, workspaceId, searchText, { documentIds: earlier, signal: stream.signal })).strongest >= CONVERSATION_FILE_MATCH; }
-      catch (error) { if (stream.signal.aborted) return stopped(); }
+      catch { if (stream.signal.aborted) return stopped(); }
     }
     let studyIds = [...input.documentIds, ...(followsUp ? earlier : [])];
     const explicitFiles = studyIds.length > 0 || scope === "files" || scope === "both" || questionRefersToFiles(question);

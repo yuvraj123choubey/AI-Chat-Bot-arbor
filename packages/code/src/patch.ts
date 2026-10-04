@@ -16,7 +16,17 @@ function quoteStyle(text: string): string | undefined {
  * then also ignoring which quote character is used. A failed
  * edit reports the closest lines so the next attempt can copy them exactly. All edits apply or none do.
  */
-export function applyEdits(content: string, edits: Edit[]): { content: string; changes: { added: number; removed: number }[] } {
+/** read_file shows lines as "  12| code"; models often copy that prefix into edits. */
+const numberPrefix = /^\s*\d+\| ?/;
+export function stripLineNumbers(edit: Edit): Edit {
+  const lines = edit.find.split("\n").filter(l => l.trim());
+  if (!lines.length || !lines.every(l => numberPrefix.test(l))) return edit;
+  const strip = (text: string) => text.split("\n").map(l => l.replace(numberPrefix, "")).join("\n");
+  return { find: strip(edit.find), replace: strip(edit.replace) };
+}
+
+export function applyEdits(content: string, rawEdits: Edit[]): { content: string; changes: { added: number; removed: number }[] } {
+  const edits = rawEdits.map(stripLineNumbers);
   let text = content;
   const changes: { added: number; removed: number }[] = [];
   edits.forEach((edit, n) => {

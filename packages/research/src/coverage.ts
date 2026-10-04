@@ -6,7 +6,7 @@ import type { EvidenceSource } from "./types.ts";
  * Words a question is phrased with rather than what it is about: verbs (sources use other forms, "find" → "found")
  * and generic qualifiers ("best", "main", "ways"). They say nothing about whether the subject was covered.
  */
-const questionVerbs = new Set(tokenize("find found say said make made happen happened use used work works mean means cause caused show shows get got take took give gave know known need needs want called call compare explain describe best good better main top most important common different difference differences way ways type types kind kinds example examples reason reasons step steps thing things exact exactly really actually basically specific specifically whole entire overall general detail details information info stuff"));
+const questionVerbs = new Set(tokenize("find found say said make made happen happened use used work works mean means cause caused show shows get got take took give gave know known need needs want called call compare explain describe best good better main top most important common different difference differences way ways type types kind kinds example examples reason reasons step steps thing things exact exactly really actually basically specific specifically whole entire overall general detail details information info stuff during after before while since until regarding concerning around"));
 
 export interface Coverage { coverage: number; covered: string[]; missing: string[] }
 
@@ -46,4 +46,29 @@ export function gapNote(gap: Coverage, question: string): string {
   const words = (question.match(/[\p{L}\p{N}][\p{L}\p{N}'.-]*/gu) || []);
   const shown = gap.missing.map(t => words.find(w => tokenize(w)[0] === t) ?? t);
   return `Note: none of the sources mention ${shown.map(s => `"${s}"`).join(", ")}. For anything that depends on ${shown.length > 1 ? "these" : "it"}, say you could not verify it in the sources.`;
+}
+
+/**
+ * For a question about one specific event: whether the thing it names was found at all. When no source matched the
+ * event and the question's identifying terms (flight or case numbers, unusual names) appear in none of the sources,
+ * the honest answer is that no record was found, not a template filled with "unknown".
+ */
+export function eventNotFound(gap: Coverage, anchorsFound: number): boolean {
+  if (anchorsFound > 0 || !gap.missing.length) return false;
+  const numbers = gap.missing.filter(t => /\d{3,}/.test(t));
+  return numbers.length > 0 || gap.coverage < 0.5;
+}
+
+export function notFoundAnswer(question: string, gap: Coverage, searched: { queries: string[]; sources: number }): string {
+  const words = (question.match(/[\p{L}\p{N}][\p{L}\p{N}'.-]*/gu) || []);
+  // The identifying terms first (numbers, then the rarest-looking words), at most four.
+  const ranked = [...gap.missing].sort((a, b) => Number(/\d{3,}/.test(b)) - Number(/\d{3,}/.test(a)) || b.length - a.length).slice(0, 4);
+  const shown = ranked.map(t => words.find(w => tokenize(w)[0] === t) ?? t);
+  const queries = searched.queries.slice(0, 3).map(q => `"${q}"`).join(", ");
+  return [
+    searched.sources
+      ? `I couldn't find any record of this. I searched for ${queries} and read ${searched.sources} source${searched.sources === 1 ? "" : "s"}, and none of them mention ${shown.map(s => `"${s}"`).join(", ")}.`
+      : `I couldn't find any record of this. I searched for ${queries}, and none of the searches returned a source about it.`,
+    "So I can't tell you what happened, and I won't guess. It may not exist, or it may be known by a different name, number or date — if you can check those details, I'll search again."
+  ].join("\n\n");
 }

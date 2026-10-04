@@ -150,7 +150,7 @@ test("agent: edits to a web page are opened in a browser before finishing; conso
   ]);
   try {
     const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Make the heading say Hello there");
-    assert.match(s.seen[3], /Not finished: the page shows errors after your edits:\n.*(Unexpected token|SyntaxError)/);
+    assert.match(s.seen[3], /Not finished: the page shows errors after your edits \(loading it and clicking each button once\):\n.*(Unexpected token|SyntaxError)/);
     assert.match(s.seen[5], /Hello there/);
     assert.match(s.seen[5], /No console errors/);
     assert.equal(result.summary, "Heading says Hello there.");
@@ -223,5 +223,118 @@ test("agent: a bug fix finished without a reproducing test says it is not verifi
   try {
     const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "double(4) returns 9 instead of 8, please fix this bug");
     assert.equal(result.summary, "Fixed double. (Not verified: no test reproduces the reported bug.)");
+  } finally { p.runner.stopAll(); await p.cleanup(); }
+});
+
+test("agent tools: references, dependencies, rename with importers, aliases", async () => {
+  const p = await project(mathProject);
+  const s = scripted([
+    { action: "find_references", name: "add" },
+    { action: "inspect_dependencies", path: "src/math.js" },
+    { action: "inspect_dependencies", path: "" },
+    { action: "rename_file", path: "src/index.js", new_path: "src/main.js" },
+    { action: "run_typecheck" },
+    { action: "finish", summary: "Looked around." }, { action: "finish", summary: "Looked around." }
+  ]);
+  try {
+    await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Explain how add is used");
+    assert.match(s.seen[1], /Defined: src\/math\.js:1/);
+    assert.match(s.seen[1], /src\/index\.js:2: console\.log\(add\(2, 3\)\);/);
+    assert.match(s.seen[1], /src\/math\.js:5: export const double = x => add\(x, x\);/);
+    assert.doesNotMatch(s.seen[1], /src\/math\.js:1: export function add/, "the definition is not listed as a use");
+    assert.match(s.seen[2], /src\/math\.js imports:\n- nothing\nImported by: src\/index\.js, src\/math\.test\.js|Imported by: src\/math\.test\.js, src\/index\.js/);
+    assert.match(s.seen[3], /package\.json scripts: test = node --test/);
+    assert.match(s.seen[4], /Renamed src\/index\.js to src\/main\.js\./);
+    assert.ok(existsSync(join(p.root, "src/main.js")) && !existsSync(join(p.root, "src/index.js")));
+    assert.match(s.seen[5], /This project has no typecheck command/);
+  } finally { p.runner.stopAll(); await p.cleanup(); }
+  // Names other agents use are accepted.
+  assert.deepEqual(validateAction({ action: "inspect_diff", path: "a.js" }), { action: "git_diff", path: "a.js", note: undefined });
+  assert.deepEqual(validateAction({ action: "revert_checkpoint" }), { action: "revert", note: undefined });
+  assert.equal((validateAction({ action: "inspect_browser", path: "index.html", viewport: "both" }) as { viewport: string }).viewport, "both");
+});
+
+test("agent: a responsive task is checked at phone width before it can finish", { skip: !findBrowser() && "no local Chrome or Edge" }, async () => {
+  const p = await project({
+    "index.html": "<!doctype html><html><head><link rel=\"stylesheet\" href=\"style.css\"></head><body><div class=\"row\"><div class=\"card\">One</div><div class=\"card\">Two</div></div></body></html>\n",
+    "style.css": ".row { display: flex; }\n.card { width: 600px; flex: none; }\n"
+  });
+  const s = scripted([
+    { action: "read_file", path: "style.css" },
+    { action: "apply_patch", path: "style.css", edits: [{ find: ".row { display: flex; }", replace: ".row { display: flex; flex-wrap: wrap; }" }] },
+    { action: "finish", summary: "Made it responsive." },
+    { action: "read_file", path: "index.html" },
+    { action: "apply_patch", path: "index.html", edits: [{ find: "<head>", replace: "<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" }] },
+    { action: "apply_patch", path: "style.css", edits: [{ find: ".card { width: 600px; flex: none; }", replace: ".card { width: 600px; max-width: 100%; flex: none; }" }] },
+    { action: "view_page", path: "index.html", click: "", viewport: "both" },
+    { action: "finish", summary: "Cards wrap and fit on phones." }
+  ]);
+  try {
+    const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Make this page responsive so it works on phones");
+    assert.match(s.seen[3], /Not finished: at phone width the layout is not right yet\.\nLayout \(mobile 390×844\): HORIZONTAL OVERFLOW/);
+    assert.match(s.seen[3], /No <meta name="viewport"/);
+    assert.match(s.seen[7], /--- desktop ---[\s\S]*fits the viewport width[\s\S]*--- mobile ---[\s\S]*Layout \(mobile 390×844\): fits the viewport width/);
+    assert.equal(result.summary, "Cards wrap and fit on phones.");
+  } finally { p.runner.stopAll(); await p.cleanup(); }
+});
+
+test("agent: an error that only happens when a button is clicked is caught before finishing", { skip: !findBrowser() && "no local Chrome or Edge" }, async () => {
+  const p = await project({
+    "index.html": "<!doctype html><html><body><span id=\"count\">0</span><button id=\"add\">Add</button><script src=\"app.js\"></script></body></html>\n",
+    "app.js": "document.getElementById('add').addEventListener('click', () => {\n  const badge = document.getElementById('cnt');\n  badge.textContent = Number(badge.textContent) + 1;\n});\n"
+  });
+  const s = scripted([
+    { action: "read_file", path: "app.js" },
+    { action: "apply_patch", path: "app.js", edits: [{ find: "Number(badge.textContent) + 1", replace: "Number(badge.textContent) + 2" }] },
+    { action: "finish", summary: "Adds two." },
+    { action: "apply_patch", path: "app.js", edits: [{ find: "getElementById('cnt')", replace: "getElementById('count')" }] },
+    { action: "finish", summary: "Adds two, using the right element." }
+  ]);
+  try {
+    const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "The add button should add two to the count");
+    assert.match(s.seen[3], /clicking each button once\):\n.*Cannot (read|set) properties of null/);
+    assert.equal(result.summary, "Adds two, using the right element.");
+  } finally { p.runner.stopAll(); await p.cleanup(); }
+});
+
+test("agent: the same failure three times in a row goes back to the last state where every check passed", async () => {
+  const p = await project(mathProject);
+  const s = scripted([
+    { action: "read_file", path: "src/math.js" },
+    { action: "apply_patch", path: "src/math.js", edits: [{ find: "return a - b;", replace: "return a + b;" }] },
+    { action: "run_tests" },
+    { action: "apply_patch", path: "src/math.js", edits: [{ find: "return a + b;", replace: "return a + b; }}" }] },
+    { action: "run_tests" },
+    { action: "apply_patch", path: "src/math.js", edits: [{ find: "export const double", replace: "// attempt\nexport const double" }] },
+    { action: "run_tests" },
+    { action: "apply_patch", path: "src/math.js", edits: [{ find: "// attempt", replace: "// attempt 2" }] },
+    { action: "run_tests" },
+    { action: "finish", summary: "add() fixed." }
+  ]);
+  try {
+    const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Refactor add");
+    assert.doesNotMatch(s.seen[7], /AUTO-RECOVERY/, "two identical failures are not yet a loop");
+    assert.match(s.seen[9], /AUTO-RECOVERY: this exact failure happened three times in a row/);
+    assert.equal(await readFile(join(p.root, "src/math.js"), "utf8"), mathProject["src/math.js"].replace("a - b", "a + b"), "back to the passing fix, later edits undone");
+    assert.equal(result.metrics.success, true);
+    assert.equal(result.metrics.filesChanged, 1);
+  } finally { p.runner.stopAll(); await p.cleanup(); }
+});
+
+test("patches: line-number prefixes copied from read_file are ignored", () => {
+  const src = ".plans { display: flex; }\n.plan { width: 320px; }\n";
+  const out = applyEdits(src, [{ find: "   1| .plans { display: flex; }", replace: "   1| .plans { display: flex; flex-wrap: wrap; }" }]);
+  assert.equal(out.content, ".plans { display: flex; flex-wrap: wrap; }\n.plan { width: 320px; }\n");
+  // A real line that happens to look numbered is left alone when the find text is not all numbered.
+  assert.equal(applyEdits("a\n1| b\n", [{ find: "a\n1| b", replace: "c" }]).content, "c\n");
+});
+
+test("agent: a summary claiming a change when nothing was edited is corrected", async () => {
+  const p = await project(mathProject);
+  const s = scripted([{ action: "finish", summary: "Fixed add()." }, { action: "finish", summary: "add() is now fixed." }]);
+  try {
+    const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Fix add so it adds");
+    assert.match(result.summary, /^No files were changed, so the task was not done\./);
+    assert.equal(result.metrics.success, false);
   } finally { p.runner.stopAll(); await p.cleanup(); }
 });

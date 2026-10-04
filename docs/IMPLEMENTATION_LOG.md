@@ -2,6 +2,30 @@
 
 Newest first. Each entry: what changed, how it was verified, what is still open.
 
+## 2026-10-04 — Intelligence layer: study engine, verified review, recovery-aware coding agent
+
+**Built**
+- Study engine (`packages/study`): study planning (lookup / whole / review), document outlines (tasks, questions,
+  parts), material gathering that reads whole documents when they fit and the named units plus best passages when
+  not, quote-verified study notes cached per document, deadlines extracted verbatim, final consistency checks.
+- Submission review: requirements split into parts; commands, word limits and screenshots checked mechanically;
+  explanations judged as yes/no backed by sentences really in the submission; answer assembled from the checks
+  ("Not yet. 2 of 5 requirements are complete." + ✓/⚠/✗ per task, what to fix, what could not be verified).
+- Screenshots: local OCR (tesseract.js + bundled model) with preprocessing (sharp: greyscale, dark-mode
+  inversion, upscaling); image previews show exactly the text Arbor read; unreadable images are reported as such.
+- Context: files stay with a conversation (persisted attachments, coursework follow-ups keep them); research
+  searches again when results miss part of the question.
+- Coding agent: find_references, inspect_dependencies, rename_file, run_typecheck, run_lint, view_page with
+  desktop/mobile layout reports; finish gates click every button once and check layout tasks at phone width;
+  "last green" checkpoints with automatic recovery after the same failure three times; alternative tool names.
+- Evaluations: `npm run eval:study` (document study, context, honesty, submission review, research) against the
+  live app; `npm run eval:agent` gained a responsive-layout task checked at phone width.
+
+**Fixed along the way**
+- Page checks failed under tsx (`__name` injected into functions sent to the browser).
+- Markdown turned underscores inside file names into italics.
+- Small models echoed the question at the start of answers.
+
 ## 2026-10-03 — Files, document preview, Code Workspace and coding agent
 
 **Built**

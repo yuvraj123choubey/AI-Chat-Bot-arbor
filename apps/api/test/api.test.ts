@@ -419,7 +419,7 @@ test("study: 'is my submission complete?' checks each requirement; follow-ups ke
   // Asking about a task that does not exist is answered honestly.
   const missing = await chat({ conversationId: review.conversationId, message: "What does task 9 say?" });
   const missingText = missing.events.find(e => e.type === "done").content ?? missing.events.filter(e => e.type === "delta").map(e => e.text).join("");
-  assert.match(missingText, /^There is no Task 9 in lab5\.md, submission\.md — lab5\.md has Task 1, Task 2/);
+  assert.match(missingText, /^There is no Task 9 in lab5\.md — it has Task 1, Task 2\./);
   // A coursework follow-up that shares no words with the earlier turns still uses the conversation's files.
   const handIn = await chat({ conversationId: review.conversationId, message: "Do I need a screenshot?" });
   assert.ok(handIn.events.find(e => e.type === "sources")?.sources.some((s: any) => s.source.title === "lab5.md"));

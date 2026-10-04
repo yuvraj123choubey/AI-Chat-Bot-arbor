@@ -10,7 +10,7 @@ export interface EvalTask {
   files: Record<string, string>;
   /** Files written after the agent finishes, then `verify` is run; the agent cannot see or edit these. */
   hidden?: Record<string, string>;
-  verify: { command: string } | { page: { path: string; click?: string; expectText: RegExp[]; forbidText?: RegExp[] } };
+  verify: { command: string } | { page: { path: string; click?: string; expectText: RegExp[]; forbidText?: RegExp[]; /** Checked at phone width: no sideways overflow and a viewport meta tag. */ mobile?: boolean } };
   /** The project's own checks that must still pass afterwards. */
   regression?: string;
 }
@@ -92,5 +92,29 @@ export const tasks: EvalTask[] = [
       "app.js": "const button = document.getElementById('buy');\nconst badge = document.getElementById('cart');\n\nbutton.addEventListener('click', () => {\n  badge.textContent = Number(badge.textContent) + 1;\n});\n"
     },
     verify: { page: { path: "index.html", click: "#buy", expectText: [/Add to cart/, /Cart:\s*1\b/], forbidText: [/\bBuy\b/] } }
+  },
+  {
+    id: "responsive", category: "ui",
+    request: "Make the pricing page responsive: on a phone the three plan cards should stack and nothing should need horizontal scrolling. Desktop should still show them side by side.",
+    files: {
+      "index.html": `<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Pricing</title><link rel="stylesheet" href="style.css"></head>
+<body>
+  <h1>Plans</h1>
+  <div class="plans">
+    <div class="plan"><h2>Basic</h2><p>$5 a month</p></div>
+    <div class="plan"><h2>Pro</h2><p>$15 a month</p></div>
+    <div class="plan"><h2>Team</h2><p>$40 a month</p></div>
+  </div>
+</body>
+</html>
+`,
+      "style.css": `body { font-family: sans-serif; margin: 0; padding: 16px; }
+.plans { display: flex; gap: 24px; }
+.plan { width: 320px; flex: none; border: 1px solid #ccc; padding: 16px; }
+`
+    },
+    verify: { page: { path: "index.html", expectText: [/Basic/, /Pro/, /Team/], mobile: true } }
   }
 ];

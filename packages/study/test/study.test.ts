@@ -59,7 +59,7 @@ test("gather: the whole lab when it fits, the named unit for a lookup, and units
   assert.ok(look.evidence[0].passages.length < big.chunks.length);
   const missing = gatherMaterial({ question: "What is question 9?", plan: planStudy("What is question 9?"), docs: [big], queryVector: [], budgetChars: 20_000 });
   assert.equal(missing.notFound[0], "question 9 — there is no question 9 in big.pdf (it has Task 1–Task 4)");
-  assert.equal(missingUnitsAnswer(planStudy("What is question 9?"), missing), "There is no Question 9 in big.pdf — big.pdf has Task 1–Task 4. I couldn't find what you're asking about in your files, so I won't guess what it says. Which one did you mean?");
+  assert.equal(missingUnitsAnswer(planStudy("What is question 9?"), missing), "There is no Question 9 in big.pdf — it has Task 1–Task 4. I couldn't find what you're asking about in your files, so I won't guess what it says. Which one did you mean?");
   assert.equal(missingUnitsAnswer(planStudy("What does task 3 ask me to block?"), look), undefined, "a unit that exists is answered normally");
   assert.match(finalizeStudyAnswer("Here is what I found.", missing), /> I couldn't find question 9 in your files/);
   assert.equal(finalizeStudyAnswer("I couldn't find question 9 in the lab.", missing), "I couldn't find question 9 in the lab.");

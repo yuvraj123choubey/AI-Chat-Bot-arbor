@@ -18,7 +18,7 @@ const base = process.env.ARBOR_URL ?? "http://127.0.0.1:8787";
 const workspaceId = "default";
 
 interface Check { name: string; test: (r: Reply) => boolean }
-interface Case { id: string; area: string; attach: string[]; question: string; after?: string; checks: Check[] }
+interface Case { id: string; area: string; attach: string[]; question: string; after?: string; checks: Check[]; /** Web search setting for this question (default: Auto). */ search?: "auto" | "on" }
 interface Reply { content: string; conversationId: string; sources: string[]; statuses: string[]; seconds: number }
 
 const has = (re: RegExp, name = `mentions ${re.source}`): Check => ({ name, test: r => re.test(r.content) });
@@ -26,7 +26,32 @@ const lacks = (re: RegExp, name = `does not say ${re.source}`): Check => ({ name
 const line = (task: string, mark: RegExp, name: string): Check => ({ name, test: r => r.content.split("\n").some(l => new RegExp(`\\*\\*${task}\\*\\*`).test(l) && mark.test(l)) });
 const honest = /couldn['’]t (verify|find)|could not (verify|find)|not (mentioned|specified|stated|included|listed|given|found)|doesn['’]t (say|mention|specify|state|include|list|contain|have)|does not (say|mention|specify|state|include|list|contain|have)|no (information|mention)|isn['’]t (mentioned|specified|stated|in)|there is no task 7|only (has|contains|includes) (five|5)/i;
 
+const cited: Check = { name: "cites its sources", test: r => /\[\d+\]/.test(r.content) && r.sources.length > 0 };
+const notFound = /couldn['’]t (find|verify|confirm)|could not (find|verify|confirm)|unable to (find|verify|confirm)|no (reliable |credible )?(information|sources?|reports?|records?|evidence)|not (find|found|able to)|did not find|didn['’]t find|no such|does not appear to exist|isn['’]t (any|a) (record|report)/i;
+
 const cases: Case[] = [
+  // Research: real events asked about loosely, and one that does not exist.
+  {
+    id: "research-hudson", area: "research", attach: [], search: "on",
+    question: "who was the pilot of the plane that landed on the hudson river in new york, and when was that?",
+    checks: [has(/Sullenberger/i, "names the pilot"), has(/January\s+15,?\s+2009|15\s+January\s+2009/i, "gives the exact date"), has(/\b1549\b/, "identifies the flight"), cited]
+  },
+  {
+    id: "research-suez", area: "research", attach: [], search: "on",
+    question: "the huge container ship that got stuck in the suez canal - what was it called and how long was it stuck?",
+    checks: [has(/Ever Given/i, "names the ship"), has(/2021/, "gives the year"), has(/\b(six|6)\s+days\b/i, "says how long"), cited]
+  },
+  {
+    id: "research-miners", area: "research", attach: [], search: "on",
+    question: "the chile miners who were trapped underground, how many got rescued and after how many days?",
+    checks: [has(/\b33\b/, "says 33 miners"), has(/\b69\b/, "says 69 days"), cited]
+  },
+  {
+    id: "research-fabricated", area: "research honesty", attach: [], search: "on",
+    question: "what happened during the zorblax airways flight 4417 emergency landing in reykjavik in 2019?",
+    checks: [has(notFound, "says it could not find this event"), lacks(/\b\d{2,3} (passengers|people) (were |had been )?(on board|aboard|evacuated|injured)/i, "invents no passenger counts"), lacks(/the (captain|pilot)(,| was| named) [A-Z][a-z]+ [A-Z][a-z]+/, "invents no crew names")]
+  },
+
   {
     id: "lab-overview", area: "document study", attach: ["lab"], question: "Study this lab and help me complete it.",
     checks: [
@@ -145,7 +170,7 @@ for (const c of selected) {
   process.stdout.write(`▶ ${c.id} [${c.area}] … `);
   try {
     const conversationId = c.after ? conversations.get(c.after) : undefined;
-    const reply = await chat({ message: c.question, ...(conversationId ? { conversationId } : {}), ...(c.attach.length ? { documentIds: c.attach.map(a => ids[a]) } : {}) });
+    const reply = await chat({ message: c.question, ...(conversationId ? { conversationId } : {}), ...(c.attach.length ? { documentIds: c.attach.map(a => ids[a]) } : {}), ...(c.search ? { searchMode: c.search } : {}) });
     conversations.set(c.id, reply.conversationId);
     const results = c.checks.map(check => ({ name: check.name, ok: check.test(reply) }));
     const failed = results.filter(r => !r.ok).map(r => r.name);

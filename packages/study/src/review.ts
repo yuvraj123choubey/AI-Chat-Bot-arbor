@@ -150,7 +150,7 @@ export async function reviewSubmission(input: {
     const parts = splitParts(r.detail);
     const shotPart = parts.find(p => p.kind === "screenshot");
     const matchingShots = shotPart ? readable.filter(s => screenshotMatches(s.chunks.map(c => c.text).join("\n"), shotPart, r.detail)) : [];
-    let screenshot: RequirementCheck["screenshot"] = !shotPart ? "not-needed" : matchingShots.length ? "read" : !screenshots.length ? "missing" : readable.length ? "unmatched" : "unread";
+    const screenshot: RequirementCheck["screenshot"] = !shotPart ? "not-needed" : matchingShots.length ? "read" : !screenshots.length ? "missing" : readable.length ? "unmatched" : "unread";
 
     // Numbered submission without this number, or nothing related at all: missing, without asking a model.
     if (!same.length && ((numbered && r.number) || overlap(answer) < 2) && !matchingShots.length) {

@@ -88,7 +88,8 @@ function withBreaks(text: string): React.ReactNode[] {
   return text.split("\n").flatMap((part, k) => k ? [<br key={`b${k}`} />, ...inline(part, `l${k}`)] : inline(part, `l${k}`));
 }
 function inline(text: string, prefix = "i"): React.ReactNode[] {
-  const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*|__[^_]+__)|(\*[^*\s][^*]*\*|_[^_\s][^_]*_)|\[(\d{1,3})\](?!\()|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  // Underscores inside a word ("lab5_jlee_draft.pdf", snake_case) never mean emphasis, as in CommonMark.
+  const pattern = /(`[^`]+`)|(\*\*[^*]+\*\*|(?<![A-Za-z0-9])__[^_]+__(?![A-Za-z0-9]))|(\*[^*\s][^*]*\*|(?<![A-Za-z0-9])_[^_\s][^_]*_(?![A-Za-z0-9]))|\[(\d{1,3})\](?!\()|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
   const out: React.ReactNode[] = [];
   let last = 0;
   for (const m of text.matchAll(pattern)) {

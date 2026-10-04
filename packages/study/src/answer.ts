@@ -44,10 +44,13 @@ export function studyPrompt(question: string, plan: StudyPlan, material: StudyMa
 export function missingUnitsAnswer(plan: StudyPlan, material: StudyMaterial): string | undefined {
   if (plan.scope !== "lookup" || !plan.refs.length || material.notFound.length < plan.refs.length) return undefined;
   const asked = plan.refs.map(r => r.text.trim());
-  const names = material.units.filter(u => u.labels.length);
-  const have = names.map(u => `${u.name} has ${unitRange(u.labels)}`).join("; ");
+  // The document that defines the tasks is the one with the most of them (not, say, a draft that answers a few).
+  const most = Math.max(0, ...material.units.map(u => u.labels.length));
+  const defining = material.units.filter(u => u.labels.length && u.labels.length === most);
+  const have = defining.map(u => `${u.name} has ${unitRange(u.labels)}`).join("; ");
   const label = (t: string) => t[0].toUpperCase() + t.slice(1);
-  return `There is no ${asked.map(label).join(" or ")} in ${material.reading.map(r => r.name).join(", ")}${have ? ` — ${have}` : ""}. I couldn't find what you're asking about in your files, so I won't guess what it says. Which one did you mean?`;
+  const where = defining.length ? defining.map(u => u.name).join(", ") : material.reading.map(r => r.name).join(", ");
+  return `There is no ${asked.map(label).join(" or ")} in ${where}${have ? ` — it has ${defining.length === 1 ? unitRange(defining[0].labels) : have}` : ""}. I couldn't find what you're asking about in your files, so I won't guess what it says. Which one did you mean?`;
 }
 
 /** Removes a copy of the question from the start of an answer (small models often echo it). */

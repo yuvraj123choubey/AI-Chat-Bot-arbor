@@ -68,6 +68,13 @@ async function runTask(task: EvalTask): Promise<Row> {
       const page = await viewPage(root, { path: task.verify.page.path, actions: task.verify.page.click ? [{ click: task.verify.page.click }] : [] });
       hiddenPassed = !page.error && !page.consoleErrors.length && task.verify.page.expectText.every(r => r.test(page.text)) && !(task.verify.page.forbidText ?? []).some(r => r.test(page.text));
       log.push(`page check: ${page.error ?? ""} text=${JSON.stringify(page.text.slice(0, 200))} errors=${page.consoleErrors.join(" | ")}`);
+      if (task.verify.page.mobile) {
+        const phone = await viewPage(root, { path: task.verify.page.path, viewport: "mobile" });
+        const l = phone.layout;
+        const fits = Boolean(l && l.viewportMeta && l.pageWidth <= l.width + 1);
+        hiddenPassed &&= fits;
+        log.push(`phone check: ${l ? `${l.pageWidth}px page in ${l.width}px viewport, viewport meta ${l.viewportMeta ? "present" : "missing"}, overflowing: ${l.overflowing.join(", ") || "none"}` : phone.error}`);
+      }
     }
     const m = result.metrics;
     return { id: task.id, category: task.category, success: hiddenPassed && regressionsOk !== false, hiddenPassed, regressionsOk, agentFinished: m.finished, checksPassing: m.checksPassing, filesChanged: m.filesChanged, linesChanged: m.linesAdded + m.linesRemoved, retries: m.retries, steps: m.steps, seconds: Math.round((Date.now() - started) / 1000), summary: result.summary };

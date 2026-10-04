@@ -4,7 +4,8 @@ import { createServer, type Server } from "node:http";
 import { extname } from "node:path";
 import { insideProject } from "./paths.ts";
 
-export interface PageAction { click?: string; fill?: { selector: string; value: string } }
+/** clickEach: click every visible match once (up to 6), as a smoke test that interactions do not throw. */
+export interface PageAction { click?: string; fill?: { selector: string; value: string }; clickEach?: string }
 /** How the page fits its viewport: what overflows sideways, tiny text, and whether it declares a mobile viewport. */
 export interface LayoutReport { viewport: string; width: number; pageWidth: number; overflowing: string[]; smallText: number; viewportMeta: boolean }
 export interface PageReport { url: string; title: string; text: string; consoleErrors: string[]; failedRequests: string[]; error?: string; layout?: LayoutReport }
@@ -68,10 +69,25 @@ export async function viewPage(root: string, opts: { path?: string; url?: string
     for (const action of opts.actions ?? []) {
       if (action.fill) await page.fill(action.fill.selector, action.fill.value, { timeout: 5000 });
       if (action.click) await page.click(action.click, { timeout: 5000 });
+      if (action.clickEach) {
+        const targets = await page.locator(action.clickEach).all();
+        for (const target of targets.slice(0, 6)) {
+          if (!(await target.isVisible().catch(() => false))) continue;
+          await target.click({ timeout: 3000, noWaitAfter: true }).catch(() => {});
+          await page.waitForTimeout(100);
+        }
+      }
       await page.waitForTimeout(150);
     }
     const text = (await page.evaluate(() => document.body?.innerText ?? "")).replace(/\n{3,}/g, "\n\n").trim();
-    const layout = { viewport: `${opts.viewport ?? "desktop"} ${device.viewport.width}×${device.viewport.height}`, ...await page.evaluate(measureLayout) };
+    // Without a viewport tag a phone lays the page out ~980px wide and zooms out, hiding overflow; the tag is added
+    // for the measurement so the real phone-width layout is checked, and its absence is still reported.
+    const hasMeta = await page.evaluate(() => Boolean(document.querySelector('meta[name="viewport"]')));
+    if (device.isMobile && !hasMeta) {
+      await page.evaluate(() => { const m = document.createElement("meta"); m.name = "viewport"; m.content = "width=device-width, initial-scale=1"; document.head.appendChild(m); });
+      await page.waitForTimeout(150);
+    }
+    const layout = { viewport: `${opts.viewport ?? "desktop"} ${device.viewport.width}×${device.viewport.height}`, ...(await page.evaluate(measureLayout) as Omit<LayoutReport, "viewport">), viewportMeta: hasMeta };
     return { url, title: await page.title(), text: text.slice(0, 5000), consoleErrors: consoleErrors.slice(0, 20), failedRequests: [...new Set(failedRequests)].slice(0, 20), layout };
   } catch (error) {
     return { url, title: "", text: "", consoleErrors, failedRequests, error: error instanceof Error ? error.message.split("\n")[0].slice(0, 300) : String(error) };
@@ -85,24 +101,28 @@ export async function viewPage(root: string, opts: { path?: string; url?: string
  * Runs in the page: the outermost elements that stick out of the viewport sideways (the cause, not every child of
  * it), the number of text elements under 12px, and whether a mobile viewport meta tag is declared.
  */
-function measureLayout(): Omit<LayoutReport, "viewport"> {
+/*
+ * Written as plain JavaScript source, not a function: page.evaluate serialises functions, and TypeScript runners
+ * (tsx) insert helpers such as __name into them that do not exist inside the page.
+ */
+const measureLayout = `(() => {
   const width = document.documentElement.clientWidth;
-  const outside = (el: Element) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (r.right > width + 1 || r.left < -1); };
-  const name = (el: Element) => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}${[...el.classList].slice(0, 2).map(c => `.${c}`).join("")}`;
-  const overflowing: string[] = [];
+  const outside = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 && (r.right > width + 1 || r.left < -1); };
+  const label = el => el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + Array.from(el.classList).slice(0, 2).map(c => "." + c).join("");
+  const overflowing = [];
   for (const el of Array.from(document.querySelectorAll("body *"))) {
     if (!outside(el) || (el.parentElement && el.parentElement !== document.body && outside(el.parentElement))) continue;
     if (getComputedStyle(el).position === "fixed") continue;
-    overflowing.push(`${name(el)} (${Math.round(el.getBoundingClientRect().width)}px wide)`);
+    overflowing.push(label(el) + " (" + Math.round(el.getBoundingClientRect().width) + "px wide)");
     if (overflowing.length >= 8) break;
   }
   let smallText = 0;
   for (const el of Array.from(document.querySelectorAll("body *"))) {
-    const own = Array.from(el.childNodes).some(n => n.nodeType === 3 && (n.textContent ?? "").trim());
+    const own = Array.from(el.childNodes).some(n => n.nodeType === 3 && (n.textContent || "").trim());
     if (own && parseFloat(getComputedStyle(el).fontSize) < 12) smallText++;
   }
   return { width, pageWidth: document.documentElement.scrollWidth, overflowing, smallText, viewportMeta: Boolean(document.querySelector('meta[name="viewport"]')) };
-}
+})()`;
 
 /** A layout report in a few plain lines, for the agent and the user. */
 export function describeLayout(l: LayoutReport): string {
