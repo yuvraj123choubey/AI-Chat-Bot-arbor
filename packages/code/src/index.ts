@@ -2,7 +2,7 @@ export { ProjectFiles, languageOf, looksBinary, MAX_EDIT_BYTES, type TreeEntry, 
 export { ProjectHistory, type Checkpoint, type Diff, type FileChange } from "./history.ts";
 export { CommandRunner, CommandError, checkCommand, commandEnv, parseCommand, type RunInfo, type RunEvent } from "./runner.ts";
 export { Previews, detectProject, type PreviewState, type ProjectKind } from "./preview.ts";
-export { runAgent, isTestFile, validateAction, actionSchema, agentSystemPrompt, projectOverview, failureDigest, referencedFiles, type AgentAction, type AgentEvent, type AgentResult, type AgentMetrics, type MemoryView, type PlanStep } from "./agent.ts";
+export { runAgent, isTestFile, failureLocation, validateAction, actionSchema, agentSystemPrompt, projectOverview, failureDigest, referencedFiles, type AgentAction, type AgentEvent, type AgentResult, type AgentMetrics, type MemoryView, type PlanStep } from "./agent.ts";
 export { indexRepo, findSymbol, relevantFiles, extractSymbols, extractImports, resolveImport, describeFile, type RepoIndex } from "./repo-index.ts";
 export { detectChecks, type Check } from "./checks.ts";
 export { applyEdits, PatchError, type Edit } from "./patch.ts";

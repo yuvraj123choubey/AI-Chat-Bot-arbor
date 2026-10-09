@@ -18,7 +18,8 @@ export interface DecideOptions {
 export function modelDecider(options: DecideOptions): (messages: Message[]) => Promise<AgentAction> {
   const [first] = options.candidates;
   const common = { providers: options.providers, signal: options.signal, onCall: options.onCall };
-  const constrained = (candidates: ModelDefinition[], messages: Message[]) => generateStructured({ ...common, name: "agent_action", schema: actionSchema, validate: validateAction, candidates, messages, maxOutputTokens: 3000, temperature: 0.1, timeoutMs: 240_000 }).then(r => r.data);
+  // One tool call is at most ~3000 tokens (a whole small file); a call far slower than that is stuck, not thinking.
+  const constrained = (candidates: ModelDefinition[], messages: Message[]) => generateStructured({ ...common, name: "agent_action", schema: actionSchema, validate: validateAction, candidates, messages, maxOutputTokens: 3000, temperature: 0.1, timeoutMs: 120_000 }).then(r => r.data);
   if (!first?.supportsReasoning) return messages => constrained(options.candidates, messages);
   const instruction = "Reply with only one JSON object: the tool call, with an \"action\" field and the fields that tool needs, plus a short \"note\".";
   return async messages => {

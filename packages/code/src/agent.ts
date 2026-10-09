@@ -7,6 +7,7 @@ import { describeFile, findSymbol, indexRepo, relevantFiles, type RepoIndex } fr
 import type { CommandRunner, RunInfo } from "./runner.ts";
 import { checkCommand } from "./runner.ts";
 import { describeLayout, viewPage, type ViewportName } from "./browser.ts";
+import { introducedSyntaxError } from "./syntax.ts";
 import type { ProjectFiles } from "./workspace.ts";
 import { cleanRelative } from "./paths.ts";
 import { isQuestion, looksLikeBugReport } from "./intent.ts";
@@ -27,6 +28,7 @@ export type AgentAction = (
   | { action: "write_file"; path: string; content: string }
   | { action: "delete_file"; path: string }
   | { action: "rename_file"; path: string; new_path: string }
+  | { action: "rename_symbol"; from: string; to: string }
   | { action: "run_command"; command: string }
   | { action: "run_tests" } | { action: "run_build" } | { action: "run_checks" } | { action: "run_typecheck" } | { action: "run_lint" }
   | { action: "git_status" } | { action: "git_diff"; path: string }
@@ -60,7 +62,7 @@ export const actionSchema = {
     variant("read_range", { path: s, start_line: { type: "integer" }, end_line: { type: "integer" } }),
     variant("search_code", { query: s }), variant("find_symbol", { name: s }), variant("find_references", { name: s }), variant("inspect_dependencies", { path: s }),
     variant("apply_patch", { path: s, edits: { type: "array", items: { type: "object", properties: { find: s, replace: s } } } }),
-    variant("create_file", { path: s, content: s }), variant("write_file", { path: s, content: s }), variant("delete_file", { path: s }), variant("rename_file", { path: s, new_path: s }),
+    variant("create_file", { path: s, content: s }), variant("write_file", { path: s, content: s }), variant("delete_file", { path: s }), variant("rename_file", { path: s, new_path: s }), variant("rename_symbol", { from: s, to: s }),
     variant("run_command", { command: s }), variant("run_tests"), variant("run_build"), variant("run_checks"), variant("run_typecheck"), variant("run_lint"),
     variant("git_status"), variant("git_diff", { path: s }), variant("checkpoint", { label: s }), variant("revert"),
     variant("view_page", { path: s, click: s, viewport: { enum: ["desktop", "mobile", "both"] } }), variant("finish", { summary: s })
@@ -90,6 +92,11 @@ export function validateAction(data: any): AgentAction | string {
     case "search_code": return str(data.query)?.trim() ? { action: a, query: data.query, note } : "search_code needs a query";
     case "find_symbol": case "find_references": return str(data.name)?.trim() ? { action: a, name: data.name.trim(), note } : `${a} needs a name`;
     case "inspect_dependencies": return { action: a, path: str(data.path) ?? "", note };
+    case "rename_symbol": {
+      const ident = /^[A-Za-z_$][\w$]*$/;
+      const from = str(data.from)?.trim(), to = str(data.to)?.trim();
+      return from && to && ident.test(from) && ident.test(to) && from !== to ? { action: a, from, to, note } : "rename_symbol needs from and to: two different identifiers (letters, digits, _ or $)";
+    }
     case "rename_file": return need("path") || !str(data.new_path ?? data.to)?.trim() ? "rename_file needs path and new_path" : { action: a, path: data.path, new_path: (data.new_path ?? data.to).trim(), note };
     case "apply_patch": {
       const edits = Array.isArray(data.edits) ? data.edits.filter((e: any) => str(e?.find) !== undefined && str(e?.replace) !== undefined) : [];
@@ -133,7 +140,7 @@ export function agentSystemPrompt(): string {
   return [
     "You are Arbor's coding agent. You work inside one real project and act only through tools. Work like a strong senior engineer:",
     "INSPECT: never assume a file, function, route, dependency or framework exists. Use list_directory, search_code, find_symbol and read_file to look first. For an error, find the file and line it names and read that code.",
-    "UNDERSTAND: before changing a function, find_references shows every place that uses it; inspect_dependencies shows what a file imports and who imports it, or the project's packages and scripts. Follow the patterns the code already uses.",
+    "UNDERSTAND: before changing a function, find_references shows every place that uses it (rename_symbol renames an identifier everywhere at once); inspect_dependencies shows what a file imports and who imports it, or the project's packages and scripts. Follow the patterns the code already uses.",
     "PLAN: for anything beyond a one-line fix, call update_plan with short steps, and update it as steps are done.",
     "EDIT: make the smallest correct change with apply_patch. Each edit's `find` is copied exactly from read_file output (without the line-number prefix) and must be unique; include a few surrounding lines. For a small file (under 200 lines) that needs several changes, write_file with its complete new content is safer than many patches. Use create_file only for new files. Do not rewrite or reformat unrelated code. Follow the project's existing style and structure.",
     "REPRODUCE: for a reported bug, if the existing tests pass they do not cover it. First read the module under test so the test uses its real exports, then add a small test for the exact reported case (patch the existing test file, or create_file for a new one in the same style), run it to see it fail, then fix the code until it passes. Fix the root cause in the module that computes the value, not a workaround where it is displayed.",
@@ -159,6 +166,20 @@ export async function projectOverview(files: ProjectFiles, index?: RepoIndex, ch
 }
 
 /** file:line references in an error message or task text, so the agent starts at the failing code. */
+/**
+ * Where a failure points: the first project file and line in the output, preferring source files over test files
+ * (a failing test usually reports the test's line first, but the cause is in the code it calls).
+ */
+export function failureLocation(output: string, paths: Set<string>): { path: string; line: number } | undefined {
+  const found: { path: string; line: number }[] = [];
+  for (const m of output.matchAll(/([\w./\\-]+\.(?:[jt]sx?|mjs|cjs|py|java|go|rs|rb|php|cs|c|cpp|h|vue|svelte))(?::|", line |\()(\d+)/g)) {
+    const rel = m[1].replace(/\\/g, "/").replace(/^\.?\//, "");
+    const hit = [...paths].find(p => p === rel || p.endsWith(`/${rel}`) || rel.endsWith(`/${p}`));
+    if (hit) found.push({ path: hit, line: Number(m[2]) });
+  }
+  return found.find(f => !isTestFile(f.path)) ?? found[0];
+}
+
 export function referencedFiles(text: string, paths: Set<string>): string[] {
   const out = new Set<string>();
   for (const m of text.matchAll(/([\w./\\-]+\.(?:[jt]sx?|mjs|cjs|py|java|go|rs|rb|php|cs|c|cpp|h|css|html|json|vue|svelte))(?::(\d+))?/g)) {
@@ -202,7 +223,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
     checkState: new Map<string, { status: "pending" | "passed" | "failed"; afterEdit: boolean }>(checks.map(c => [c.name, { status: "pending", afterEdit: false }]))
   };
   let lastEditAt = -1, step = 0, checkRuns = 0, retries = 0, blockedFinishes = 0, lastFailedRun = -1;
-  let lastGreen: string | undefined, greenEdits = 0, sameFailure = { key: "", count: 0 };
+  let lastGreen: string | undefined, greenEdits = 0, sameFailure = { key: "", count: 0 }, editVersion = 0;
   const linesChanged = { added: 0, removed: 0 };
   const recent: Message[] = [];
   let lastSignature = "", lastAction = "", idleSteps = 0, freeSkips = 0;
@@ -230,7 +251,9 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
   const testsPassAtStart = checks.some(c => c.name === "test") && memory.checkState.get("test")?.status === "passed";
   const reproduce = looksLikeBugReport(task) && testsPassAtStart ? "\nNOTE: the tests pass but the task reports a bug, so the tests do not cover it. Add a test that reproduces the report, see it fail, then fix the root cause." : "";
   const baseline = baselineLines.length ? `BASELINE (before any change):\n${baselineLines.join("\n")}${reproduce}` : "";
-  let noChangeFinishes = 0, pageFinishes = 0, reproFinishes = 0, layoutFinishes = 0, lastPageViewAt = -1;
+  let noChangeFinishes = 0, reproFinishes = 0;
+  // Browser gates: the edit version last checked, what was still wrong, and how often the agent was sent back.
+  let pageCheckedAt = -1, layoutCheckedAt = -1, pageProblem = "", layoutProblem = "", gateRejections = 0, gateFailed = false;
   const overview = await projectOverview(files, index, checks);
   emitState();
   deps.event({ kind: "inspect", title: `Indexed ${index.files.size} files`, detail: memory.relevant.slice(0, 4).map(r => r.path).join(", ") || undefined });
@@ -284,7 +307,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
   const finalChecks = checks.map(c => ({ name: c.name, status: memory.checkState.get(c.name)!.status }));
   const checksPassing = checks.length && memory.edits.length ? finalChecks.every(c => c.status === "passed") : null;
   const metrics: AgentMetrics = {
-    success: finished && checksPassing !== false && (Boolean(diff?.files.length) || isQuestion(task) || !summary.startsWith("No files were changed")), finished, checksPassing, filesChanged: diff?.files.length ?? 0,
+    success: finished && checksPassing !== false && !gateFailed && (Boolean(diff?.files.length) || isQuestion(task) || !summary.startsWith("No files were changed")), finished, checksPassing, filesChanged: diff?.files.length ?? 0,
     linesAdded: diff?.files.reduce((n, f) => n + f.added, 0) ?? linesChanged.added, linesRemoved: diff?.files.reduce((n, f) => n + f.removed, 0) ?? linesChanged.removed,
     retries, checkRuns, steps: step, elapsedMs: now() - started, finalChecks
   };
@@ -358,7 +381,10 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
     let failure = "";
     for (const c of chosen) {
       const r = await runCheck(c);
-      out.push(`${c.command}: ${r.passed ? "PASSED" : `FAILED\n${tail(r.output, 3500)}`}`);
+      const at = r.passed ? undefined : failureLocation(r.output, new Set(index.files.keys()));
+      const lastEdited = memory.edits.findLast(e => !e.path.startsWith("("))?.path;
+      const hint = at ? `\nTHE ERROR POINTS AT: ${at.path} line ${at.line}.${lastEdited && lastEdited !== at.path ? ` Your last edit was to ${lastEdited}; the problem to fix is in ${at.path}.` : ""}` : "";
+      out.push(`${c.command}: ${r.passed ? "PASSED" : `FAILED\n${tail(r.output, 3500)}${hint}`}`);
       if (!r.passed && !failure) failure = `${c.name}:${failureKey(r.output)}`;
     }
     if (memory.edits.length) {
@@ -386,17 +412,31 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
     await history.restore(lastGreen, "last state where all checks passed");
     index = await indexRepo(files);
     const undone = memory.edits.splice(greenEdits).map(e => e.path);
+    editVersion++;
     memory.edits.push({ path: "(recovery)", summary: `undid ${undone.length} edit(s) after the last passing state (${[...new Set(undone)].join(", ")})` });
     for (const c of checks) memory.checkState.set(c.name, { status: "passed", afterEdit: true });
     seenSinceEdit.clear();
     deps.event({ kind: "edit", title: "Went back to the last state where all checks passed", detail: `undid edits to ${[...new Set(undone)].join(", ")}` });
     return `AUTO-RECOVERY: this exact failure happened three times in a row, so the files are back to the last state where all checks passed. Your later edits (${[...new Set(undone)].join(", ")}) were undone. Do not make them again. If the code now does what the task asks, finish; otherwise take a different approach.`;
   }
+  /**
+   * An edit that would leave a file unparseable (unbalanced braces, a return outside its function) is refused
+   * before it is written, with the exact error and the lines around it, so broken code never lands.
+   */
+  async function refuseBrokenSyntax(path: string, before: string | null, after: string) {
+    const problem = await introducedSyntaxError(path, before, after);
+    if (!problem) return;
+    const lines = after.split("\n");
+    const from = Math.max(1, problem.line - 4), to = Math.min(lines.length, problem.line + 3);
+    deps.event({ kind: "error", title: `Refused an edit that would break ${path}`, detail: `${problem.message} (line ${problem.line})` });
+    throw new Error(`This edit would break ${path}: ${problem.message} at line ${problem.line}. The file was NOT changed. After your edit those lines would read:\n${numbered(lines.slice(from - 1, to), from)}\nMake sure every { ( [ you open is closed and nothing is left outside its function. For several changes to a small file, write_file with the complete corrected file is safer.`);
+  }
   function noteEdit(path: string, summary: string, added: number, removed: number) {
     // A fix made after a check failed (since the previous edit) is one retry of the edit-test loop.
     if (lastFailedRun > lastEditAt) retries++;
     memory.edits.push({ path, summary });
     lastEditAt = step;
+    editVersion++;
     seenSinceEdit.clear();
     linesChanged.added += added; linesChanged.removed += removed;
     for (const [name, state] of memory.checkState) memory.checkState.set(name, { ...state, afterEdit: false });
@@ -484,6 +524,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
           throw new Error(`${error instanceof Error ? error.message : String(error)}${small ? " Or use write_file with the file's complete new content." : ""}`);
         }
         const { content, changes } = patched;
+        await refuseBrokenSyntax(file.path, file.content, content);
         await files.write(file.path, content);
         index = await indexRepo(files);
         const added = changes.reduce((n, c) => n + c.added, 0), removed = changes.reduce((n, c) => n + c.removed, 0);
@@ -498,6 +539,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
         const before = file.content.split("\n");
         if (before.length > 200) throw new Error(`${file.path} has ${before.length} lines; use apply_patch for large files`);
         if (!action.content.trim() && file.content.trim()) throw new Error("write_file with empty content would erase the file; use delete_file to remove it");
+        await refuseBrokenSyntax(file.path, file.content, action.content);
         await files.write(file.path, action.content);
         index = await indexRepo(files);
         const { added, removed } = lineChanges(before, action.content.split("\n"));
@@ -508,6 +550,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
       case "create_file": {
         const path = cleanRelative(action.path);
         if (await files.read(path).then(() => true, () => false)) throw new Error(`${path} already exists; read it and use apply_patch or write_file to change it`);
+        await refuseBrokenSyntax(path, null, action.content);
         await files.write(path, action.content);
         memory.read.add(path);
         index = await indexRepo(files);
@@ -525,6 +568,27 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
         deps.event({ kind: "edit", title: `Deleted ${path}`, detail: action.note });
         const users = [...(index.importedBy.get(path) ?? [])];
         return `Deleted ${path}.${users.length ? ` Warning: still imported by ${users.join(", ")}.` : ""}`;
+      }
+      case "rename_symbol": {
+        // Whole-word rename in every code file, like an editor's rename: definitions, imports and uses together.
+        const word = new RegExp(`(?<![\\w$])${action.from.replace(/\$/g, "\\$")}(?![\\w$])`, "g");
+        const code = [...index.files.values()].filter(f => !["text", "markdown", "json"].includes(f.language) && f.size < 512 * 1024);
+        const changed: string[] = [];
+        for (const entry of code) {
+          const file = await files.read(entry.path);
+          if (file.binary || file.content === null || !word.test(file.content)) continue;
+          word.lastIndex = 0;
+          const next = file.content.replace(word, action.to);
+          await refuseBrokenSyntax(entry.path, file.content, next);
+          await files.write(entry.path, next);
+          const count = (file.content.match(word) ?? []).length;
+          noteEdit(entry.path, action.note || `renamed ${action.from} to ${action.to} (${count}×)`, count, count);
+          memory.read.add(entry.path);
+          changed.push(`${entry.path} (${count})`);
+        }
+        index = await indexRepo(files);
+        deps.event({ kind: "edit", title: `Renamed ${action.from} → ${action.to}`, detail: changed.join(", ") || "no uses found" });
+        return changed.length ? `Renamed ${action.from} to ${action.to} in ${changed.length} file(s): ${changed.join(", ")}. Run the tests to verify.` : `"${action.from}" does not appear in any code file.`;
       }
       case "rename_file": {
         const from = cleanRelative(action.path), to = cleanRelative(action.new_path);
@@ -576,6 +640,7 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
         await history.restore(baseCommit, "start of this task");
         index = await indexRepo(files);
         memory.edits.push({ path: "(all)", summary: "reverted every change made in this task" });
+        editVersion++;
         seenSinceEdit.clear();
         for (const [name] of memory.checkState) memory.checkState.set(name, { status: "pending", afterEdit: false });
         deps.event({ kind: "edit", title: "Reverted all changes from this task", detail: action.note });
@@ -583,7 +648,6 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
         return "All files are back to how they were when the task started.";
       }
       case "view_page": {
-        lastPageViewAt = step;
         deps.event({ kind: "check", title: `Opening ${action.path || "the page"} in a browser`, detail: action.note });
         const url = deps.pageUrl?.();
         const sizes: ViewportName[] = action.viewport === "both" ? ["desktop", "mobile"] : [action.viewport ?? "desktop"];
@@ -617,34 +681,39 @@ export async function runAgent(deps: AgentDeps, task: string, context = "", maxS
           reproFinishes++;
           return "Not finished: the tests passed before your change too, so they do not show the reported bug is fixed. Add a test for the exact case in the task (in the project's existing test file or style), run_tests, and make sure it passes for the right reason.";
         }
-        // Edits to a web page are opened in a browser before finishing; console errors send the agent back (up to twice).
+        // Edits to a web page are opened in a browser before finishing (loading it and clicking each button), and a
+        // layout task is checked at phone width. Each gate checks again whenever the files changed since its last
+        // check, and sends the agent back while problems remain; a problem it stops working on is reported, not hidden.
         const webEdit = memory.edits.some(e => /\.(html?|css|m?jsx?|tsx|vue|svelte)$/i.test(e.path));
         const pageUrl = deps.pageUrl?.();
-        if (webEdit && lastPageViewAt < lastEditAt && pageFinishes < 2 && (pageUrl || index.files.has("index.html"))) {
-          pageFinishes++;
-          lastPageViewAt = step;
+        const hasPage = Boolean(pageUrl || index.files.has("index.html"));
+        if (webEdit && hasPage && pageCheckedAt !== editVersion) {
+          pageCheckedAt = editVersion;
           deps.event({ kind: "check", title: "Opening the page in a browser before finishing" });
-          // Buttons are clicked once each as well: many errors only happen on interaction.
           const report = await viewPage(files.root, { path: "index.html", url: pageUrl, actions: [{ clickEach: "button, [role=button], input[type=submit], input[type=button]" }] });
           const problems = [report.error, ...report.consoleErrors].filter(Boolean) as string[];
-          if (problems.length) {
-            memory.failures.push(`page: ${problems.slice(0, 3).join(" | ")}`);
+          pageProblem = problems.slice(0, 3).join(" | ");
+          if (pageProblem && gateRejections < 6) {
+            gateRejections++;
+            memory.failures.push(`page: ${pageProblem}`);
             return `Not finished: the page shows errors after your edits (loading it and clicking each button once):\n${problems.slice(0, 5).join("\n")}\nVisible text:\n${clip(report.text, 800)}\nFix the cause, then view_page to confirm.`;
           }
         }
-        // A responsive or mobile layout task is checked at phone width: nothing may stick out sideways, and phones
-        // need a viewport meta tag to render at their real width. Sent back up to twice.
-        if (webEdit && layoutTask.test(task) && layoutFinishes < 2 && (pageUrl || index.files.has("index.html"))) {
+        if (webEdit && hasPage && layoutTask.test(task) && layoutCheckedAt !== editVersion) {
+          layoutCheckedAt = editVersion;
           const report = await viewPage(files.root, { path: "index.html", url: pageUrl, viewport: "mobile" });
           deps.event({ kind: "check", title: "Checking the layout at phone width before finishing", detail: report.layout ? describeLayout(report.layout).split("\n")[0] : undefined });
           const l = report.layout;
-          if (l && (l.pageWidth > l.width + 1 || !l.viewportMeta)) {
-            layoutFinishes++;
-            memory.failures.push(`mobile layout: ${describeLayout(l).replace(/\n/g, " ")}`);
-            return `Not finished: at phone width the layout is not right yet.\n${describeLayout(l)}\nFix it (for example max-width: 100%, flex-wrap, a media query, or the viewport meta tag), then view_page with viewport "mobile" to confirm.`;
+          layoutProblem = l && (l.pageWidth > l.width + 1 || !l.viewportMeta) ? describeLayout(l).replace(/\n/g, " ") : "";
+          if (layoutProblem && gateRejections < 6) {
+            gateRejections++;
+            memory.failures.push(`mobile layout: ${layoutProblem}`);
+            return `Not finished: at phone width the layout is not right yet.\n${describeLayout(l!)}\nFix it (for example max-width: 100%, box-sizing: border-box, flex-wrap, a media query, or the viewport meta tag), then view_page with viewport "mobile" to confirm.`;
           }
         }
         summary = action.summary;
+        const unresolved = [pageProblem && `the page still shows errors (${pageProblem})`, layoutTask.test(task) && layoutProblem && `the layout still fails at phone width (${layoutProblem})`].filter(Boolean);
+        if (unresolved.length) { gateFailed = true; summary += ` (Not verified: ${unresolved.join("; ")}.)`; }
         // Verify before claiming: a summary that says something was changed, when no file was, is corrected.
         if (!memory.edits.length && !isQuestion(task) && /\b(now|updated|changed|added|fixed|made|implemented|created|renamed|removed|refactored|is (now )?(responsive|working|fixed))\b/i.test(summary)) {
           summary = `No files were changed, so the task was not done. (The agent's summary claimed: "${summary.slice(0, 200)}")`;

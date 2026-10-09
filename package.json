@@ -41,6 +41,7 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@tesseract.js-data/eng": "^1.0.0",
+    "acorn": "^8.19.0",
     "busboy": "^1.6.0",
     "codemirror": "^6.0.2",
     "embedded-postgres": "^18.4.0-beta.17",

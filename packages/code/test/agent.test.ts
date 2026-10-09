@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CommandRunner, ProjectFiles, findBrowser, isTestFile, ProjectHistory, applyEdits, detectChecks, extractImports, extractSymbols, failureDigest, findSymbol, indexRepo, referencedFiles, relevantFiles, runAgent, validateAction, type AgentAction } from "../src/index.ts";
+import { CommandRunner, ProjectFiles, failureLocation, findBrowser, isTestFile, ProjectHistory, applyEdits, detectChecks, extractImports, extractSymbols, failureDigest, findSymbol, indexRepo, referencedFiles, relevantFiles, runAgent, validateAction, type AgentAction } from "../src/index.ts";
 
 async function project(files: Record<string, string>) {
   const base = await mkdtemp(join(tmpdir(), "arbor-agent-"));
@@ -142,15 +142,15 @@ test("agent: edits to a web page are opened in a browser before finishing; conso
   });
   const s = scripted([
     { action: "read_file", path: "app.js" },
-    { action: "apply_patch", path: "app.js", edits: [{ find: "'Hello';", replace: "'Hello' }};" }], note: "Broken edit" },
+    { action: "apply_patch", path: "app.js", edits: [{ find: "getElementById('t').textContent = 'Hello';", replace: "getElementById('title').textContent = 'Hello there';" }], note: "Wrong element id" },
     { action: "finish", summary: "Done" },
-    { action: "apply_patch", path: "app.js", edits: [{ find: "'Hello' }};", replace: "'Hello there';" }] },
+    { action: "apply_patch", path: "app.js", edits: [{ find: "getElementById('title')", replace: "getElementById('t')" }] },
     { action: "view_page", path: "index.html", click: "" },
     { action: "finish", summary: "Heading says Hello there." }
   ]);
   try {
     const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Make the heading say Hello there");
-    assert.match(s.seen[3], /Not finished: the page shows errors after your edits \(loading it and clicking each button once\):\n.*(Unexpected token|SyntaxError)/);
+    assert.match(s.seen[3], /Not finished: the page shows errors after your edits \(loading it and clicking each button once\):\n.*Cannot set properties of null/);
     assert.match(s.seen[5], /Hello there/);
     assert.match(s.seen[5], /No console errors/);
     assert.equal(result.summary, "Heading says Hello there.");
@@ -303,7 +303,7 @@ test("agent: the same failure three times in a row goes back to the last state w
     { action: "read_file", path: "src/math.js" },
     { action: "apply_patch", path: "src/math.js", edits: [{ find: "return a - b;", replace: "return a + b;" }] },
     { action: "run_tests" },
-    { action: "apply_patch", path: "src/math.js", edits: [{ find: "return a + b;", replace: "return a + b; }}" }] },
+    { action: "apply_patch", path: "src/math.js", edits: [{ find: "return a + b;", replace: "return a + b + 1;" }] },
     { action: "run_tests" },
     { action: "apply_patch", path: "src/math.js", edits: [{ find: "export const double", replace: "// attempt\nexport const double" }] },
     { action: "run_tests" },
@@ -337,4 +337,50 @@ test("agent: a summary claiming a change when nothing was edited is corrected", 
     assert.match(result.summary, /^No files were changed, so the task was not done\./);
     assert.equal(result.metrics.success, false);
   } finally { p.runner.stopAll(); await p.cleanup(); }
+});
+
+test("syntax guard: an edit that would leave a file unparseable is refused and nothing is written", async () => {
+  const { syntaxProblem, introducedSyntaxError } = await import("../src/syntax.ts");
+  assert.equal(await syntaxProblem("a.js", "export function f() { return 1; }\n"), null);
+  assert.match((await syntaxProblem("a.js", "function f() {\n  return 1;\n}\n  return 2;\n}\n"))!.message, /'return' outside of function|Unexpected token/i);
+  assert.equal(await syntaxProblem("a.ts", "const x: number = 1;\n"), null);
+  assert.ok(await syntaxProblem("a.ts", "function f() {\n  if (x) {\n}\n"));
+  assert.equal(await syntaxProblem("x.rb", "def f(:"), undefined, "unsupported languages are not judged");
+  assert.ok(await syntaxProblem("p.json", "{ \"a\": 1, }"));
+  assert.equal(await introducedSyntaxError("a.jsx", "const a = <div>{x</div>;", "const a = <div>{y</div>;"), undefined, "an already-broken file never blocks an edit");
+  const p = await project(mathProject);
+  const s = scripted([
+    { action: "read_file", path: "src/math.js" },
+    { action: "apply_patch", path: "src/math.js", edits: [{ find: "  return a - b;\n}", replace: "  return a + b;\n}\n}" }] },
+    { action: "apply_patch", path: "src/math.js", edits: [{ find: "return a - b;", replace: "return a + b;" }] },
+    { action: "finish", summary: "Fixed add." }
+  ]);
+  try {
+    const result = await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Fix add so it adds");
+    assert.match(s.seen[2], /ERROR: This edit would break src\/math\.js: Unexpected token at line 4\. The file was NOT changed\./);
+    assert.match(s.seen[2], /4\| }/, "shows the lines as they would read");
+    assert.equal(result.metrics.success, true);
+    assert.equal(result.metrics.linesAdded, 1, "the refused edit never touched the file");
+  } finally { p.runner.stopAll(); await p.cleanup(); }
+});
+
+test("agent: rename_symbol renames an identifier everywhere at once; failures say where to look", async () => {
+  const p = await project(mathProject);
+  const s = scripted([
+    { action: "rename_symbol", from: "add", to: "sum" },
+    { action: "run_tests" },
+    { action: "finish", summary: "Renamed add to sum." }
+  ]);
+  try {
+    await runAgent({ files: p.files, history: p.history, runner: p.runner, projectId: "p", next: s.next, event: () => {} }, "Rename add to sum everywhere");
+    assert.match(s.seen[1], /Renamed add to sum in 3 file\(s\): /);
+    assert.match(await readFile(join(p.root, "src/math.js"), "utf8"), /export function sum\(a, b\)[\s\S]*=> sum\(x, x\)/);
+    assert.match(await readFile(join(p.root, "src/index.js"), "utf8"), /import \{ sum \} from '\.\/math\.js';\nconsole\.log\(sum\(2, 3\)\);/);
+    assert.match(await readFile(join(p.root, "src/math.test.js"), "utf8"), /import \{ sum \} from/, "the test file is renamed too");
+    assert.match(s.seen[2], /npm test: FAILED[\s\S]*THE ERROR POINTS AT: src\/math\.test\.js line \d+/, "the fixture's real bug (a - b) still fails an assertion, and the result says where");
+  } finally { p.runner.stopAll(); await p.cleanup(); }
+  assert.deepEqual(validateAction({ action: "rename_symbol", from: "a b", to: "c" }), "rename_symbol needs from and to: two different identifiers (letters, digits, _ or $)");
+  const paths = new Set(["src/report.js", "src/invoice.js", "test/pricing.test.js"]);
+  assert.deepEqual(failureLocation("file:///C:/tmp/project/src/report.js:1\nSyntaxError: The requested module './pricing.js' does not provide an export named 'calc'", paths), { path: "src/report.js", line: 1 });
+  assert.deepEqual(failureLocation("test at test\\pricing.test.js:7:1\nReferenceError: calc is not defined\n    at report (file:///C:/x/project/src/report.js:4:10)", paths), { path: "src/report.js", line: 4 }, "the source file, not the test, is where to look");
 });

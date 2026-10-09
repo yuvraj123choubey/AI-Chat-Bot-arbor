@@ -70,6 +70,8 @@ function Workspace({ project, models, context, onExit, onChanged }: { project: P
   const [gotoLine, setGotoLine] = useState<number | undefined>();
   const [diffView, setDiffView] = useState<{ title: string; diff: Diff } | null>(null);
   const [bottom, setBottom] = useState<Bottom>("terminal");
+  // The bottom panel (terminal or preview) can take most of the centre column, e.g. to see the app properly.
+  const [bottomLarge, setBottomLarge] = useState(false);
   const [side, setSide] = useState<Side>("agent");
   const [notice, setNotice] = useState("");
   const [focusRun, setFocusRun] = useState<string | undefined>();
@@ -134,13 +136,14 @@ function Workspace({ project, models, context, onExit, onChanged }: { project: P
         {notice && <span className="code-notice" role="status">{notice}</span>}
         {project.testCommand && <button type="button" className="chip" onClick={() => runCommand(project.testCommand!)}>Run tests</button>}
         {project.buildCommand && <button type="button" className="chip" onClick={() => runCommand(project.buildCommand!)}>Build</button>}
-        <button type="button" className="chip" onClick={() => setBottom("preview")}>Preview</button>
+        <button type="button" className="chip" onClick={() => { setBottom("preview"); setBottomLarge(true); }}>Preview</button>
         <button type="button" className="chip" onClick={saveVersion}><LayersIcon size={12} /> Save version</button>
       </div>
     </div>
     <div className="code-grid">
       <Explorer projectId={id} tree={tree} active={active} onOpen={open} onChanged={async () => { await loadTree(); onChanged(); }} flash={flash} />
-      <div className="code-center">
+      {/* With no file open the editor area would be empty, so a preview gets the room. */}
+      <div className={`code-center${bottomLarge || (bottom === "preview" && !tab && !diffView) ? " bottom-large" : ""}`}>
         {diffView ? <DiffViewer title={diffView.title} diff={diffView.diff} onClose={() => setDiffView(null)} onOpen={p => open(p)} /> : <>
           <div className="code-tabs" role="tablist">
             {tabs.map(t => <div key={t.path} role="tab" aria-selected={t.path === active} className={`code-tab${t.path === active ? " on" : ""}`} onClick={() => setActive(t.path)} title={t.path}>
@@ -160,6 +163,8 @@ function Workspace({ project, models, context, onExit, onChanged }: { project: P
           <div className="code-bottom-tabs" role="tablist">
             <button type="button" role="tab" aria-selected={bottom === "terminal"} className={bottom === "terminal" ? "on" : ""} onClick={() => setBottom("terminal")}>Terminal</button>
             <button type="button" role="tab" aria-selected={bottom === "preview"} className={bottom === "preview" ? "on" : ""} onClick={() => setBottom("preview")}>Preview</button>
+            <span className="spacer" />
+            <button type="button" className="bottom-size" aria-pressed={bottomLarge} title={bottomLarge ? "Make this panel smaller" : "Make this panel larger"} onClick={() => setBottomLarge(v => !v)}>{bottomLarge ? "▾ Collapse" : "▴ Expand"}</button>
           </div>
           {bottom === "terminal" ? <Terminal projectId={id} focusRun={focusRun} onRun={runCommand} /> : <Preview projectId={id} onShowRun={runId => { setFocusRun(runId); setBottom("terminal"); }} />}
         </div>

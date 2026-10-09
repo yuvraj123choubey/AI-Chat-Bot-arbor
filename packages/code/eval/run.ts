@@ -7,7 +7,7 @@
  *   EVAL_MODEL=local-thinking npm run eval:agent
  */
 import "../../../apps/api/src/setup-env.ts";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadRegistry } from "../../ai/src/registry.ts";
@@ -52,12 +52,18 @@ async function runTask(task: EvalTask): Promise<Row> {
   const log: string[] = [];
   // Every tool call the model made, verbatim, for diagnosing failures.
   const actions: string[] = [];
-  const decide = modelDecider({ candidates, providers: providerMap });
+  // A wall-clock limit per task, so one stuck task cannot stall the suite; progress is written as it happens.
+  const abort = new AbortController();
+  const limitMs = (Number(process.env.EVAL_TASK_MINUTES) || 15) * 60_000;
+  const timer = setTimeout(() => abort.abort(new Error(`task exceeded ${limitMs / 60_000} minutes`)), limitMs);
+  const live = join(outDir, `${task.id}.log`);
+  await writeFile(live, "");
+  const decide = modelDecider({ candidates, providers: providerMap, signal: abort.signal });
   try {
     const result = await runAgent({
-      files, history, runner, projectId: "eval",
+      files, history, runner, projectId: "eval", signal: abort.signal,
       next: async messages => { const action = await decide(messages); actions.push(JSON.stringify(action)); return action; },
-      event: e => { if (e.kind !== "state") { log.push(`[${Math.round((Date.now() - started) / 1000)}s] ${e.kind}: ${e.title}${e.detail ? ` — ${e.detail.replace(/\s+/g, " ").slice(0, 160)}` : ""}`); console.log(`   ${log.at(-1)}`); } }
+      event: e => { if (e.kind !== "state") { log.push(`[${Math.round((Date.now() - started) / 1000)}s] ${e.kind}: ${e.title}${e.detail ? ` — ${e.detail.replace(/\s+/g, " ").slice(0, 160)}` : ""}`); console.log(`   ${log.at(-1)}`); void appendFile(live, `${log.at(-1)}\n`); } }
     }, task.request, "", Number(process.env.EVAL_STEPS) || 30);
     // The project's own tests first (regressions), then the hidden verification the agent never saw.
     const regressionsOk = task.regression ? (await command(runner, root, task.regression)).ok : null;
@@ -81,6 +87,7 @@ async function runTask(task: EvalTask): Promise<Row> {
   } catch (error) {
     return { id: task.id, category: task.category, success: false, hiddenPassed: false, regressionsOk: null, agentFinished: false, checksPassing: null, filesChanged: 0, linesChanged: 0, retries: 0, steps: 0, seconds: Math.round((Date.now() - started) / 1000), summary: "", error: error instanceof Error ? error.message : String(error) };
   } finally {
+    clearTimeout(timer);
     runner.stopAll();
     await writeFile(join(outDir, `${task.id}.log`), log.join("\n"));
     await writeFile(join(outDir, `${task.id}.actions.jsonl`), actions.join("\n"));
